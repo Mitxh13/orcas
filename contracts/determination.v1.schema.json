@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcas.pesu.edu/contracts/determination.v1.schema.json",
+  "title": "OrcasDetermination",
+  "description": "Standard routing determination produced by ORCAS agent worker",
+  "type": "object",
+  "required": [
+    "run_id",
+    "status",
+    "route",
+    "regulator",
+    "entity_type",
+    "basis",
+    "citations",
+    "verification",
+    "prompt_versions",
+    "index_version",
+    "degraded",
+    "disposed"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique run ID associated with the complaint run"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "escalated", "failed"],
+      "description": "Terminal status of the run"
+    },
+    "route": {
+      "type": "string",
+      "enum": [
+        "assign_to_entity",
+        "refer_to_other_regulator",
+        "not_maintainable",
+        "escalate_to_human"
+      ],
+      "description": "Routing destination category"
+    },
+    "regulator": {
+      "type": "string",
+      "enum": ["SEBI", "RBI", "UNDETERMINED"],
+      "description": "Jurisdiction regulator identified"
+    },
+    "entity_type": {
+      "type": "string",
+      "enum": [
+        "broker",
+        "mutual_fund",
+        "registrar",
+        "listed_company",
+        "depository",
+        "bank",
+        "other",
+        "unknown"
+      ],
+      "description": "Responsible entity classification"
+    },
+    "timeline": {
+      "type": ["object", "null"],
+      "properties": {
+        "days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "basis_citation_id": {
+          "type": "string"
+        }
+      },
+      "required": ["days", "basis_citation_id"]
+    },
+    "basis": {
+      "type": "string",
+      "description": "Plain-language justification with citation tags"
+    },
+    "citations": {
+      "type": "array",
+      "description": "Array of circular-level citations referencing retrieved passages",
+      "items": {
+        "type": "object",
+        "required": [
+          "citation_id",
+          "doc_id",
+          "doc_title",
+          "circular_ref",
+          "clause",
+          "chunk_id",
+          "quote_span"
+        ],
+        "properties": {
+          "citation_id": {
+            "type": "string"
+          },
+          "doc_id": {
+            "type": "string"
+          },
+          "doc_title": {
+            "type": "string"
+          },
+          "circular_ref": {
+            "type": "string"
+          },
+          "clause": {
+            "type": "string"
+          },
+          "chunk_id": {
+            "type": "string"
+          },
+          "quote_span": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "escalation": {
+      "type": ["object", "null"],
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "split_regulators",
+            "out_of_corpus",
+            "unverified",
+            "budget_exhausted",
+            "agent_failure",
+            "verification_unavailable",
+            "guardrail",
+            "low_confidence"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "partial_findings": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": ["reason_code", "reason"]
+    },
+    "verification": {
+      "type": "object",
+      "required": ["passed", "claims_checked", "claims_supported", "attempts"],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "claims_checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claims_supported": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "prompt_versions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "index_version": {
+      "type": "string"
+    },
+    "degraded": {
+      "type": "boolean",
+      "description": "True if any fallback or degraded path was used"
+    },
+    "disposed": {
+      "type": "boolean",
+      "enum": [false],
+      "description": "Must strictly be false; system never disposes of complaints"
+    }
+  },
+  "additionalProperties": false
+}

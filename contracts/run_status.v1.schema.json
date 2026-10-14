@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcas.pesu.edu/contracts/run_status.v1.schema.json",
+  "title": "OrcasRunStatus",
+  "description": "Schema for complaint processing status and final result retrieval",
+  "type": "object",
+  "required": [
+    "run_id",
+    "status",
+    "submitted_at"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "completed", "escalated", "failed"]
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "started_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "result": {
+      "type": ["object", "null"],
+      "$ref": "determination.v1.schema.json"
+    }
+  },
+  "additionalProperties": false
+}

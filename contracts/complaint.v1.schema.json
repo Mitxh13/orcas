@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcas.pesu.edu/contracts/complaint.v1.schema.json",
+  "title": "OrcasComplaint",
+  "description": "Standard incoming complaint request schema validated at the ingestion boundary",
+  "type": "object",
+  "required": [
+    "client_id",
+    "is_synthetic",
+    "channel",
+    "text",
+    "date_of_event",
+    "date_filed"
+  ],
+  "properties": {
+    "client_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Identifier of the client system or user"
+    },
+    "is_synthetic": {
+      "type": "boolean",
+      "enum": [true],
+      "description": "Must be true to enforce synthetic-only constraint"
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["web", "email", "phone", "branch"],
+      "description": "Intake channel"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 4000,
+      "description": "Free text investor complaint"
+    },
+    "date_of_event": {
+      "type": "string",
+      "format": "date",
+      "description": "Date when the disputed event occurred"
+    },
+    "date_filed": {
+      "type": "string",
+      "format": "date",
+      "description": "Date when the complaint was filed"
+    },
+    "amount_disputed_inr": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000,
+      "description": "Disputed amount in INR"
+    },
+    "entity_name_hint": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Optional name hint for entity"
+    },
+    "prior_complaint_to_entity": {
+      "type": "boolean",
+      "description": "Whether complainant approached the entity first"
+    },
+    "prior_complaint_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of prior complaint to entity"
+    }
+  },
+  "additionalProperties": false
+}

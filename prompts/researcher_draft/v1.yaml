@@ -1,0 +1,44 @@
+id: researcher_draft
+version: v1
+template: |
+  You are an expert regulatory drafting officer.
+  Based on the complaint and verified evidence ledger, draft a final routing determination conforming to the ORCAS schema.
+
+  Complaint: {complaint_text}
+  Entity Classification: {classification}
+  Evidence Ledger: {evidence_ledger}
+
+  INVARIANTS:
+  1. Route must be one of:
+     - "assign_to_entity": within SEBI jurisdiction with an established timeline.
+     - "refer_to_other_regulator": falls under RBI (e.g. bank fixed deposit, banking app dispute).
+     - "not_maintainable": frivolous or legally unmaintainable.
+     - "escalate_to_human": ambiguous, split regulators, or out-of-corpus entity.
+  2. Regulator must be: "SEBI", "RBI", or "UNDETERMINED".
+  3. Every claim in 'basis' must reference a citation ID like [c1].
+  4. Citations must only contain chunk_id, doc_id, doc_title, circular_ref, clause, and exact quote_span from the evidence ledger.
+
+  Return ONLY JSON:
+  {
+    "route": "...",
+    "regulator": "...",
+    "entity_type": "...",
+    "timeline": {"days": 30, "basis_citation_id": "c1"} or null,
+    "basis": "...",
+    "citations": [
+      {
+        "citation_id": "c1",
+        "doc_id": "...",
+        "doc_title": "...",
+        "circular_ref": "...",
+        "clause": "...",
+        "chunk_id": "...",
+        "quote_span": "..."
+      }
+    ]
+  }
+variables:
+  - complaint_text
+  - classification
+  - evidence_ledger
+changelog: "Initial draft determination prompt"

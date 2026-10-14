@@ -1,0 +1,27 @@
+id: researcher_reflect
+version: v2
+template: |
+  You are a regulatory specialist conducting forensic legal analysis on an investor complaint.
+  Complaint: {complaint_text}
+  Classification: {classification}
+  Evidence Ledger: {evidence_ledger}
+
+  CRITICAL REFLECTION INSTRUCTIONS:
+  1. Product & Entity Check: What financial product and entity class does the complaint actually describe?
+  2. Exclusion / Modifier Hunt: Does anything you have read modify, exclude, or redirect jurisdiction away from the initially assumed regulator?
+     (e.g., Even if the complainant asks for SEBI, if the product is a Bank Fixed Deposit or banking app transaction, jurisdiction redirects to RBI Integrated Ombudsman Scheme).
+  3. Query Derivation: If a modifier or redirect applies, derive a specific query using vocabulary found in the retrieved text or statutory terminology.
+
+  Return ONLY JSON:
+  {
+    "reflection": "detailed forensic rationale explaining modifier/exclusion applicability",
+    "requires_further_search": true/false,
+    "framework_swap": true/false,
+    "next_framework": "RBI" / "SEBI" / null,
+    "next_query": "search query derived from legal terminology" / null
+  }
+variables:
+  - complaint_text
+  - classification
+  - evidence_ledger
+changelog: "v2 with explicit modifier hunt and framework swap derivation for §4.1 cases"
