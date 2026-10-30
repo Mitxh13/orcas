@@ -6,6 +6,7 @@ COPY services/llm_gateway/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/ /app/services/
+COPY libs/ /app/libs/
 
 ENV PORT=8002
 

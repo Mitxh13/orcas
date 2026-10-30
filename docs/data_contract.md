@@ -28,5 +28,33 @@ Malformed JSON or invalid input returns HTTP `422` with field-level `detail` ent
 The quarantine ID lets the demo locate the rejection without exposing all rejected
 complaint text through a public endpoint.
 
+The gateway screens `text` and `entity_name_hint` for explicit instructions to the
+agent and threats after schema validation and before creating a run. Flagged requests
+also return `422` and are quarantined with `guardrail:injection` or
+`guardrail:toxicity`. The current labelled set contains 20 attack examples and 20
+benign complaints; 0 of the 20 benign examples were flagged. This small set is a
+regression check, not an estimate of production false-positive rate.
+
+`GET /v1/runs/{run_id}/trace` returns ordered persisted events and their total
+recorded cost. `POST /v1/runs/{run_id}/feedback` accepts `{"rating":"up|down",
+"reason":"..."}` and persists a rating for an existing run. Quarantine listing
+and feedback totals are available at `GET /v1/admin/quarantine` and
+`GET /v1/admin/feedback/summary`. Both admin endpoints require
+`Authorization: Bearer <ORCAS_ADMIN_TOKEN>` and are unavailable until that
+environment variable is configured.
+
+Valid submissions are limited by a Redis token bucket for each `client_id`.
+The default capacity is 60 requests per minute. A rejected request returns
+`429` with `Retry-After` and creates no run. The gateway exposes request
+latency, status counts, and rate-limit rejections at `GET /metrics`.
+
+Completed determinations may be reused for an identical complaint from the
+same client when the retrieval index and prompt files are unchanged. The
+gateway returns a fresh run ID that is immediately `completed`, with
+`X-Run-Cache: hit`; no Celery message is sent. The cache TTL defaults to one
+hour. `X-Run-Cache-Bypass: true` forces a fresh execution for evaluation.
+If the cache or index-info service is unavailable, the gateway queues a fresh
+run. Cache hit and miss counts are exposed on `/metrics`.
+
 The gateway's `/docs` page shows the request and response shapes. Changes to the frozen
 schema require the decision and approval process in `contracts/README.md`.

@@ -1,0 +1,54 @@
+name: Complaint load ramp and resource diagnostics
+
+on:
+  push:
+    branches:
+      - feat/jignas/reliability-and-operations
+    paths:
+      - .github/workflows/load-ramp.yml
+      - scripts/benchmarks/ramp_experiment.sh
+      - scripts/benchmarks/prometheus_range.py
+      - scripts/benchmarks/docker_stats.py
+
+jobs:
+  load-ramp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate scripts
+        run: |
+          bash -n scripts/benchmarks/ramp_experiment.sh
+          python -m compileall -q scripts/benchmarks
+      - name: Install Locust
+        run: pip install -r loadtest/requirements.txt
+      - name: Build and start the stub-backed stack
+        run: docker compose up --build -d
+      - name: Wait for service readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if python scripts/doctor.py; then exit 0; fi
+            sleep 5
+          done
+          docker compose ps --all
+          exit 1
+      - name: Measure low-load ramp and container resources
+        run: bash scripts/benchmarks/ramp_experiment.sh
+      - name: Upload ramp results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: complaint-load-ramp
+          path: loadtest/results/ramp/
+          if-no-files-found: warn
+      - name: Show service status and logs on failure
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose logs --tail 100
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

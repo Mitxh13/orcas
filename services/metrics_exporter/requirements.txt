@@ -1,0 +1,5 @@
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+psycopg[binary]>=3.2,<4
+redis>=5,<7
+prometheus-client>=0.20,<1

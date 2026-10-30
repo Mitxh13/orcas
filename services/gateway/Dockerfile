@@ -4,6 +4,7 @@ WORKDIR /app
 COPY services/gateway/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY libs/ /app/libs/
+COPY prompts/ /app/prompts/
 COPY services/__init__.py /app/services/__init__.py
 COPY services/gateway/ /app/services/gateway/
 

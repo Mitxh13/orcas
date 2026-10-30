@@ -6,18 +6,44 @@ Run (from repo root, venv active):
 from __future__ import annotations
 
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from libs.orcas_common.logging import configure_logging, correlation_id
+from libs.orcas_common.telemetry import configure_tracing
+
 from . import metrics
-from .models import Chunk, Clause, Error, Health, IndexInfo, SearchRequest, SearchResponse
+from .models import (
+    Chunk,
+    Clause,
+    Health,
+    IndexInfo,
+    SearchRequest,
+    SearchResponse,
+)
 from .service import Retriever
 
 app = FastAPI(title="ORCAS Retrieval Service", version="1.0.0")
+configure_tracing("retrieval", app=app)
+configure_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+
+@app.middleware("http")
+async def correlate_request(request: Request, call_next):
+    candidate = request.headers.get("X-Correlation-ID", "")
+    value = candidate if 0 < len(candidate) <= 128 and candidate.isprintable() else str(uuid.uuid4())
+    token = correlation_id.set(value)
+    try:
+        response = await call_next(request)
+        response.headers.setdefault("X-Correlation-ID", value)
+        return response
+    finally:
+        correlation_id.reset(token)
 _retriever = Retriever()
 
 # Every request is bounded by a timeout so a slow query returns 504 rather than hanging.

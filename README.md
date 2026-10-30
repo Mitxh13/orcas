@@ -35,7 +35,7 @@ Web client ─▶ Gateway (FastAPI) ─▶ validate / guardrails / quarantine �
                                                                  │   Researcher agent ⇄ Verifier agent
                                                                  ├──▶ Retrieval service (Chroma + MiniLM)
                                                                  └──▶ LLM gateway (provider / breaker / cost)
-Prometheus + Grafana + OpenTelemetry/Jaeger observe everything.
+Prometheus, Grafana, OpenTelemetry, and Jaeger are configured for run inspection.
 ```
 
 Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -54,8 +54,8 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | State | PostgreSQL |
 | LLM access | Own `llm-gateway` service (LiteLLM adapters, provider chosen by env var) |
 | Evaluation | TruLens + custom claim-level hallucination metric |
-| Observability | JSON logs in the initial stack; tracing and dashboards are planned |
-| Load test | Scenario payloads are ready; Locust results are planned |
+| Observability | JSON logs, run events, OpenTelemetry/Jaeger, Prometheus, Grafana |
+| Load test | Locust measures submit-to-terminal latency; [measured results](docs/work/jignas/report-sections.md) |
 | Packaging | Docker Compose |
 
 ## 4. Setup / installation
@@ -64,25 +64,29 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - Docker Engine ≥ 24 and Docker Compose v2
 - ~8 GB free RAM, ~5 GB disk
 - No LLM API key is needed for the initial demo; the stub is enabled by default
+- Set `ORCAS_ADMIN_TOKEN` in `.env` to inspect quarantine and feedback totals
 - Python 3.11 is only needed if you want to run CLIs/tests outside Docker
 
 ### Run it
 
 ```bash
-git clone https://github.com/JignasP/orcas.git
+git clone https://github.com/Mitxh13/orcas.git
 cd orcas
 
 cp .env.example .env
 docker compose up --build -d
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The first start builds the corpus index through the `ingest` one-shot service and creates the database tables through `migrate`. Wait until `docker compose ps` shows the long-running services healthy. See the [initial demo guide](docs/initial_demo.md) for the full sequence and quarantine proof.
+On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The first start builds the corpus index through the `ingest` one-shot service and creates the database tables through `migrate`. Wait until `docker compose ps` shows the long-running services healthy. Run `make doctor` or `python scripts/doctor.py` to check readiness. See the [demo guide](docs/initial_demo.md) for the valid request and quarantine proof.
 
 | What | URL |
 |---|---|
 | Web client | http://localhost:8080 |
 | Gateway API docs (OpenAPI) | http://localhost:8000/docs |
 | Retrieval API | http://localhost:8001/docs |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 |
+| Jaeger | http://localhost:16686 |
 
 ### Variants
 
@@ -103,6 +107,8 @@ python scripts/demo/initial_demo.py
 ```bash
 make eval        # batch evaluation (>=20 scenarios), prints groundedness / context relevance / faithfulness / hallucination rate
 make test        # unit and contract tests
+make doctor      # Compose configuration and running service readiness
+make loadtest    # stub-backed end-to-end Locust workload
 ```
 
 ## 5. Repository structure
@@ -111,12 +117,13 @@ make test        # unit and contract tests
 orcas/
 ├── README.md
 ├── Makefile
-├── docker-compose.yml            # initial demo services and health checks
+├── docker-compose.yml            # application and observability services
 ├── .env.example                  # every config variable, no secrets
 ├── contracts/                    # FROZEN interfaces: JSON Schemas + OpenAPI (single source of truth)
 ├── libs/orcas_common/            # logging, config, and shared run storage
 ├── services/
 │   ├── gateway/                  # FastAPI intake, validation, quarantine, queue
+│   ├── metrics_exporter/         # persisted run and queue metrics
 │   ├── worker/                   # LangGraph agents (Researcher + Verifier), tools, resilience  (scalable)
 │   ├── llm_gateway/              # provider adapters, circuit breaker, backoff, fallback, token/cost accounting
 │   ├── llm_stub/                 # fixed-response LLM with configurable delay (load tests)
@@ -126,7 +133,8 @@ orcas/
 ├── corpus/                       # raw PDFs + MANIFEST.yaml (source URL, checksum, version, date)
 ├── prompts/                      # versioned prompt artifacts (YAML), compared in evaluation
 ├── eval/                         # scenarios.yaml (>=20), run_eval.py, live scorer, results/
-├── loadtest/                     # scenario payloads (Locust driver planned)
+├── loadtest/                     # scenario payloads and Locust driver
+├── observability/               # collector, Prometheus, provisioned Grafana
 ├── scripts/                      # helper scripts
 ├── tests/                        # service and platform tests
 └── docs/
@@ -134,6 +142,9 @@ orcas/
     ├── PROJECT_DOCUMENTATION.md
     ├── initial_demo.md
     ├── data_contract.md
+    ├── slo.md
+    ├── runbook.md
+    ├── incident_log.md
     ├── decisions/                # ADRs (one file per decision)
     └── work/                     # MITESH.md · TAHIR.md · JIGNAS.md
 ```

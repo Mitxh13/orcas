@@ -1,14 +1,24 @@
-import os
-import uuid
 import logging
+import os
 from typing import Any, Dict, Optional
 
+from opentelemetry import propagate, trace
+
+from libs.orcas_common.logging import configure_logging, correlation_id
+from libs.orcas_common.run_cache import RedisRunCache
+from libs.orcas_common.runstore import (
+    TERMINAL,
+    InMemoryRunStore,
+    PostgresRunStore,
+    RunStore,
+)
+from libs.orcas_common.telemetry import configure_tracing
 from services.worker.agent.researcher import ResearcherGraph
 from services.worker.agent.verifier import VerifierGraph
-from services.worker.guardrails.output_filter import OutputFilter
-from libs.orcas_common.runstore import InMemoryRunStore, PostgresRunStore, RunStore, TERMINAL
-from libs.orcas_common.logging import configure_logging, correlation_id
+from services.worker.clients.llm_client import LLMClient
+from services.worker.clients.observed_retrieval import ObservedRetrievalClient
 from services.worker.clients.retrieval import HttpRetrievalClient
+from services.worker.guardrails.output_filter import OutputFilter
 
 logger = logging.getLogger("worker.tasks")
 
@@ -29,6 +39,7 @@ try:
     celery_app.conf.worker_prefetch_multiplier = 1
     celery_app.conf.broker_transport_options = {"visibility_timeout": 180}
     celery_app.conf.task_time_limit = 90
+    configure_tracing("worker", instrument_httpx=True)
 
     @celery_app.task(name="orcas.run_complaint", bind=True, max_retries=0, acks_late=True)
     def run_complaint(self, run_id: str) -> Dict[str, Any]:
@@ -36,11 +47,15 @@ try:
         configure_logging(os.getenv("LOG_LEVEL", "INFO"))
         token = correlation_id.set(run_id)
         try:
-            return run_complaint_pipeline(run_id=run_id)
+            context = propagate.extract(self.request.headers or {})
+            with trace.get_tracer(__name__).start_as_current_span("worker.run_complaint", context=context):
+                return run_complaint_pipeline(run_id=run_id)
         finally:
             correlation_id.reset(token)
 
-except ImportError:
+except ImportError as exc:
+    if exc.name != "celery":
+        raise
     celery_app = None
     logger.info("Celery not installed; run_complaint_pipeline available as plain function.")
 
@@ -52,9 +67,9 @@ def _runtime_store():
     return PostgresRunStore() if os.getenv("DATABASE_URL") else global_run_store
 
 
-def _retrieval_client():
+def _retrieval_client(run_id: str | None = None):
     if os.getenv("RETRIEVAL_SERVICE_URL"):
-        return HttpRetrievalClient()
+        return HttpRetrievalClient(run_id=run_id)
     from services.worker.clients.fake_retrieval import FakeRetrievalClient
     return FakeRetrievalClient()
 
@@ -76,7 +91,21 @@ def run_complaint_pipeline(
     5. Event emission for full run reconstruction (Requirement D5).
     """
     store = run_store or _runtime_store()
-    r_graph = researcher_graph or ResearcherGraph(retrieval_client=_retrieval_client())
+    def record_llm(agent, step, prompt_version, result, latency_ms):
+        usage = result.get("usage", {})
+        store.append_event(
+            run_id, agent, step, "llm_call", latency_ms=latency_ms,
+            payload={"prompt_version": prompt_version, "model": result.get("model"),
+                     "degraded": result.get("degraded", False)},
+            tokens={"prompt": usage.get("prompt_tokens", 0),
+                    "completion": usage.get("completion_tokens", 0)},
+            cost_usd=float(usage.get("cost_usd", 0)),
+        )
+
+    retrieval = ObservedRetrievalClient(_retrieval_client(run_id), store, run_id)
+    r_graph = researcher_graph or ResearcherGraph(
+        retrieval_client=retrieval, llm_client=LLMClient(run_id=run_id, on_call=record_llm)
+    )
     v_graph = verifier_graph or VerifierGraph(retrieval_client=r_graph.retrieval, llm_client=r_graph.llm)
 
     record = store.get_run(run_id)
@@ -99,7 +128,8 @@ def run_complaint_pipeline(
     )
 
     try:
-        complaint_payload = record.get("payload", {})
+        complaint_payload = dict(record.get("payload", {}))
+        cache_key = complaint_payload.pop("_cache_key", None)
         
         # 1. Researcher Phase
         draft = r_graph.run(run_id=run_id, complaint_fields=complaint_payload)
@@ -172,6 +202,20 @@ def run_complaint_pipeline(
 
         status = filtered_det.get("status", "completed")
         store.complete(run_id, filtered_det)
+        verification = filtered_det.get("verification") or {}
+        try:
+            store.add_eval_score(run_id, "verification_passed",
+                                 float(bool(verification.get("passed"))),
+                                 {"source": "worker_verifier"})
+        except Exception:
+            logger.exception("unable to persist verification score")
+        if cache_key and os.getenv("REDIS_URL") and status in {"completed", "escalated"}:
+            try:
+                RedisRunCache(os.environ["REDIS_URL"], int(os.getenv("RUN_CACHE_TTL_S", "3600"))).put(
+                    cache_key, filtered_det
+                )
+            except Exception:
+                logger.exception("unable to cache completed run")
 
         store.append_event(
             run_id=run_id,

@@ -25,7 +25,8 @@ class RecordingDispatcher:
         return True
 
 
-def test_postgres_intake_quarantine_and_worker_handoff():
+def test_postgres_intake_quarantine_and_worker_handoff(monkeypatch):
+    monkeypatch.setenv("ORCAS_ADMIN_TOKEN", "test-admin-token")
     url = os.environ["TEST_DATABASE_URL"]
     migrate(url)
     migrate(url)  # The startup migration must be safe to rerun.
@@ -50,6 +51,9 @@ def test_postgres_intake_quarantine_and_worker_handoff():
     assert rejected.status_code == 422
     quarantine_id = rejected.json()["quarantine_id"]
     assert store.get_quarantine(quarantine_id)["reason"] == "validation"
+    listing = client.get("/v1/admin/quarantine", headers={"Authorization": "Bearer test-admin-token"})
+    assert listing.status_code == 200
+    assert any(item["quarantine_id"] == quarantine_id for item in listing.json()["items"])
     assert dispatcher.sent == []
     with psycopg.connect(url) as connection:
         assert connection.execute("SELECT count(*) FROM runs").fetchone()[0] == runs_before
@@ -68,3 +72,15 @@ def test_postgres_intake_quarantine_and_worker_handoff():
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["result"]["route"] == "refer_to_other_regulator"
+    trace = client.get(f"/v1/runs/{run_id}/trace")
+    assert trace.status_code == 200
+    assert trace.json()["events"][0]["kind"] == "run_started"
+
+    feedback = client.post(f"/v1/runs/{run_id}/feedback", json={"rating": "up", "reason": "correct"})
+    assert feedback.status_code == 201
+    assert feedback.json()["feedback_id"]
+    summary = client.get("/v1/admin/feedback/summary",
+                         headers={"Authorization": "Bearer test-admin-token"})
+    assert summary.json()["up"] >= 1
+    score = store.add_eval_score(run_id, "verification_passed", 1.0)
+    assert score["score_id"]

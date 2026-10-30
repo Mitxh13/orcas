@@ -1,6 +1,8 @@
 # ORCAS Architecture
 
-Status: design baseline (Day 0). Anything marked **[TBD]** is decided by the owner on the named day and recorded as an ADR in `docs/decisions/`.
+Status: implementation in progress. The deployment and measurement claims below
+are verified only when exercised on a Docker host; local unit and database tests
+do not establish end-to-end availability or the load target.
 
 ## 1. Goals that drive the architecture
 
@@ -33,7 +35,7 @@ flowchart LR
     W -->|"search / clause / chunk"| RS["retrieval<br/>FastAPI + Chroma"]
     W -->|"chat"| LG["llm-gateway<br/>breaker, backoff, cost"]
     LG -->|"profile: live"| PROV["Free-tier LLM provider"]
-    LG -->|"profile: stub"| STUB["llm-stub<br/>fixed reply + delay"]
+    LG -->|"stub mode"| STUB["llm-stub<br/>fixed reply + delay"]
     LG --> Q
 
     ING["ingest<br/>one-shot, idempotent CLI"] --> CH[("chroma volume")]
@@ -44,13 +46,15 @@ flowchart LR
         OT["otel-collector"] --> J["jaeger"]
         P["prometheus"] --> G["grafana"]
         CA["cadvisor"] --> P
+        WM["worker-metrics"] --> P
     end
     GW -.-> OT
     W -.-> OT
     RS -.-> OT
     LG -.-> OT
     P -.->|"scrape /metrics"| GW
-    P -.-> W
+    WM -.-> PG
+    WM -.-> Q
     P -.-> RS
     P -.-> LG
 ```
@@ -69,7 +73,14 @@ A deployment boundary is the unit that is built, scaled, restarted and released 
 | **ingest** | *Lifecycle.* Batch job, not a server. Runs at start and on demand; idempotent. |
 | **web** | *Independent release.* Static client; no business logic. |
 | **redis / postgres** | *State separation.* Redis = ephemeral (queue, cache, rate limit, breaker). Postgres = durable (runs, events, quarantine, feedback). |
+| **worker-metrics** | *Read-only metrics adapter.* Queries persisted events and queue depth for run KPIs without embedding an HTTP server in every Celery process. |
 | **prometheus / grafana / otel-collector / jaeger / cadvisor** | *Observability plane*, separate from the data plane so monitoring survives application failure. |
+
+The gateway validates before creating a run or queue message. Redis uses
+separate databases for cache/rate limit, Celery broker, and Celery results.
+The worker has no fixed host port, so `docker compose up --scale worker=3`
+can start additional replicas. Prompt files are copied into the gateway
+image solely to version cache keys; the worker retains the execution copy.
 
 Rejected: a single "agent + retrieval" container (shares one deployment boundary regardless of code separation, so retrieval memory would be duplicated on every scaled worker); a worker-embedded breaker (see above).
 

@@ -1,0 +1,51 @@
+name: Complaint processing benchmark
+
+on:
+  push:
+    branches:
+      - feat/jignas/reliability-and-operations
+    paths:
+      - .github/workflows/benchmark.yml
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate benchmark scripts
+        run: |
+          bash -n scripts/benchmarks/ci_experiment.sh
+          python -m compileall -q scripts/benchmarks
+      - name: Install Locust
+        run: pip install -r loadtest/requirements.txt
+      - name: Build and start the stub-backed stack
+        run: docker compose up --build -d
+      - name: Wait for service readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if python scripts/doctor.py; then exit 0; fi
+            sleep 5
+          done
+          docker compose ps --all
+          exit 1
+      - name: Run baseline, scaling, and cache experiments
+        run: bash scripts/benchmarks/ci_experiment.sh
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: complaint-benchmark
+          path: loadtest/results/ci/
+          if-no-files-found: warn
+      - name: Show service status and logs on failure
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose logs --tail 100
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

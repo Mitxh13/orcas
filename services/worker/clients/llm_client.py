@@ -2,7 +2,9 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
+
 import httpx
 
 logger = logging.getLogger("worker.llm_client")
@@ -10,8 +12,11 @@ logger = logging.getLogger("worker.llm_client")
 
 class LLMClient:
     """Client for calling the ORCAS LLM Gateway from worker agents."""
-    def __init__(self, gateway_url: Optional[str] = None):
+    def __init__(self, gateway_url: Optional[str] = None, run_id: Optional[str] = None,
+                 on_call=None):
         self.gateway_url = gateway_url or os.getenv("LLM_GATEWAY_URL", "http://localhost:8002")
+        self.run_id = run_id
+        self.on_call = on_call
 
     def chat(
         self,
@@ -23,24 +28,35 @@ class LLMClient:
         prompt_version: Optional[str] = None,
         timeout: float = 15.0
     ) -> Dict[str, Any]:
+        started = time.monotonic()
         payload = {
             "messages": messages,
             "temperature": temperature,
-            "run_id": run_id,
+            "run_id": run_id or self.run_id,
             "agent": agent,
             "step": step,
             "prompt_version": prompt_version
         }
         try:
             with httpx.Client(timeout=timeout) as client:
-                resp = client.post(f"{self.gateway_url}/v1/chat", json=payload)
+                headers = {"X-Correlation-ID": run_id or self.run_id} if run_id or self.run_id else {}
+                resp = client.post(f"{self.gateway_url}/v1/chat", json=payload, headers=headers)
                 if resp.status_code == 200:
-                    return resp.json()
+                    result = resp.json()
+                    self._record_call(agent, step, prompt_version, result, started)
+                    return result
                 logger.warning("LLM Gateway returned status %d; falling back to heuristic.", resp.status_code)
         except Exception as exc:
             logger.warning("LLM Gateway unreachable (%s); falling back to local heuristic.", exc)
 
-        return self._local_heuristic_chat(messages, agent, step)
+        result = self._local_heuristic_chat(messages, agent, step)
+        self._record_call(agent, step, prompt_version, result, started)
+        return result
+
+    def _record_call(self, agent, step, prompt_version, result, started):
+        if self.on_call:
+            self.on_call(agent or "unknown", step or "unknown", prompt_version or "unknown",
+                         result, round((time.monotonic() - started) * 1000))
 
     def _local_heuristic_chat(
         self,

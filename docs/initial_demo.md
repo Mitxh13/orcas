@@ -57,3 +57,15 @@ python -m pytest tests/platform tests/agent -q
 The gateway can be tested without Docker using an in-memory run store and a
 recording dispatcher. A passing local test does not prove that Compose starts;
 the clean-clone run above is required for that claim.
+
+## Additional platform demo checks
+
+After the intake demo, run `python scripts/demo/check_guardrail_rejection.py`
+to show an instruction embedded in a complaint receiving `422` and a
+quarantine ID. The Compose smoke job checks that this rejection creates no
+additional run. Use `python scripts/demo/check_jaeger_trace.py` to find a
+connected gateway, queue, worker, retrieval, and LLM gateway trace in Jaeger.
+Run `python scripts/demo/check_observability.py` to check Prometheus scrape
+data and the provisioned Grafana dashboard. The benchmark outcomes and
+declared target are recorded in [Jignas's report](work/jignas/report-sections.md)
+and [the SLO](slo.md).

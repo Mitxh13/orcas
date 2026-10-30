@@ -27,6 +27,7 @@ RUN pip install -r requirements.txt
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 COPY services/ ./services/
+COPY libs/ ./libs/
 
 EXPOSE 8001
 # Readiness probe: /ready returns 503 until the index volume is populated by ingest, then 200.

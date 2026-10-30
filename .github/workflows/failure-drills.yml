@@ -1,0 +1,45 @@
+name: Compose failure drills
+
+on:
+  push:
+    branches:
+      - feat/jignas/reliability-and-operations
+    paths:
+      - .github/workflows/failure-drills.yml
+      - scripts/benchmarks/failure_drills.py
+
+jobs:
+  failure-drills:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the stub-backed stack
+        run: docker compose up --build -d
+      - name: Wait for service readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if python scripts/doctor.py; then exit 0; fi
+            sleep 5
+          done
+          docker compose ps --all
+          exit 1
+      - name: Establish a successful baseline
+        run: python scripts/demo/initial_demo.py --timeout 180
+      - name: Exercise worker, Redis, and retrieval failures
+        run: python scripts/benchmarks/failure_drills.py
+      - name: Upload drill outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-failure-drills
+          path: loadtest/results/ci/failure-drills.json
+          if-no-files-found: warn
+      - name: Show service status and logs on failure
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose logs --tail 100
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

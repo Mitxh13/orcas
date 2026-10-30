@@ -63,13 +63,25 @@ def main() -> int:
     else:
         raise SystemExit("Run did not reach a terminal status before timeout")
 
+    result = run.get("result") or {}
+    if (run["status"], result.get("route"), result.get("regulator")) != (
+        "completed", "refer_to_other_regulator", "RBI"
+    ):
+        raise SystemExit("Reference bank complaint did not complete with the RBI route")
+
+    status, trace = request("GET", f"{base}/v1/runs/{run_id}/trace")
+    kinds = {event["kind"] for event in trace.get("events", [])}
+    if status != 200 or not {"tool_call", "llm_call", "verify", "run_finished"} <= kinds:
+        raise SystemExit(f"Run trace is missing required steps: {kinds}")
+    print(f"Trace events: {len(trace['events'])}")
+
     malformed = dict(valid, date_filed=(event - timedelta(days=1)).isoformat())
     status, rejected = request("POST", f"{base}/v1/complaints", malformed)
     if status != 422:
         raise SystemExit(f"Malformed complaint was not rejected: {status} {rejected}")
     print(f"Rejected malformed complaint: quarantine_id={rejected['quarantine_id']}")
     print(f"Field errors: {rejected['detail']}")
-    return 0 if run["status"] in {"completed", "escalated"} else 1
+    return 0
 
 
 if __name__ == "__main__":

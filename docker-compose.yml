@@ -53,6 +53,8 @@ services:
       ORCAS_INDEX_INFO: /data/index_info.json
       EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - index_data:/data
     ports:
@@ -93,6 +95,8 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       llm-stub:
         condition: service_healthy
@@ -114,7 +118,10 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       RETRIEVAL_SERVICE_URL: http://retrieval:8001
       LLM_GATEWAY_URL: http://llm-gateway:8002
+      REDIS_URL: redis://redis:6379/0
+      RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -125,7 +132,7 @@ services:
       llm-gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "celery", "-A", "services.worker.tasks:celery_app", "inspect", "ping", "--timeout=5"]
+      test: ["CMD-SHELL", "celery -A services.worker.tasks:celery_app inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q pong"]
       interval: 15s
       timeout: 10s
       start_period: 30s
@@ -140,7 +147,13 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      ORCAS_ADMIN_TOKEN: ${ORCAS_ADMIN_TOKEN:-}
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
+      RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
+      RETRIEVAL_SERVICE_URL: http://retrieval:8001
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8000:8000"
     depends_on:
@@ -168,6 +181,95 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
       interval: 10s
+      timeout: 5s
+      retries: 5
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.64.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:14269/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.114.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "components"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker-metrics:
+    build:
+      context: .
+      dockerfile: services/metrics_exporter/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:-orcas_demo_only}@postgres:5432/${POSTGRES_DB:-orcas}
+      REDIS_URL: redis://redis:6379/1
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/ready', timeout=3)"]
+      interval: 15s
       timeout: 5s
       retries: 5
 

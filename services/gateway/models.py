@@ -44,6 +44,13 @@ class RunStatus(BaseModel):
     result: dict[str, Any] | None = None
 
 
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rating: Literal["up", "down"]
+    reason: str = Field(default="", max_length=500)
+
+
 def cross_field_errors(complaint: Complaint, today: date | None = None) -> list[dict[str, Any]]:
     today = today or date.today()
     errors: list[dict[str, Any]] = []

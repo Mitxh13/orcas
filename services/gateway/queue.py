@@ -1,6 +1,7 @@
 """Celery dispatch used by the intake API."""
 
 from celery import Celery
+from opentelemetry import propagate, trace
 
 from libs.orcas_common.config import celery_broker_url, celery_result_backend
 
@@ -10,8 +11,11 @@ class CeleryDispatcher:
         self.app = Celery("orcas-gateway", broker=celery_broker_url(), backend=celery_result_backend())
 
     def send(self, run_id: str) -> None:
-        self.app.send_task("orcas.run_complaint", args=[run_id], queue="orcas_tasks", task_id=run_id,
-                           headers={"correlation_id": run_id})
+        with trace.get_tracer(__name__).start_as_current_span("queue.publish"):
+            headers = {"correlation_id": run_id}
+            propagate.inject(headers)
+            self.app.send_task("orcas.run_complaint", args=[run_id], queue="orcas_tasks", task_id=run_id,
+                               headers=headers)
 
     def ping(self) -> bool:
         with self.app.connection_for_write() as connection:

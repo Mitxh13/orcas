@@ -1,27 +1,50 @@
 import asyncio
-import random
+import logging
 import os
+import random
 import time
 import uuid
-import logging
 from typing import List, Optional
-from fastapi import FastAPI
-from pydantic import BaseModel
-import httpx
 
-from services.llm_gateway.config import config
+import httpx
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+
+from libs.orcas_common.logging import configure_logging, correlation_id
+from libs.orcas_common.telemetry import configure_tracing
 from services.llm_gateway.accounting import calculate_cost
 from services.llm_gateway.breaker import CircuitBreaker
+from services.llm_gateway.config import config
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("llm_gateway")
 
 app = FastAPI(title="ORCAS LLM Gateway", version="1.0.0")
+configure_tracing("llm-gateway", app=app, instrument_httpx=True)
+
+
+@app.middleware("http")
+async def correlate_request(request: Request, call_next):
+    candidate = request.headers.get("X-Correlation-ID", "")
+    value = candidate if 0 < len(candidate) <= 128 and candidate.isprintable() else str(uuid.uuid4())
+    token = correlation_id.set(value)
+    try:
+        response = await call_next(request)
+        response.headers.setdefault("X-Correlation-ID", value)
+        return response
+    finally:
+        correlation_id.reset(token)
 breaker = CircuitBreaker()
 
 # Prometheus metrics (Requirement A6 – per-agent metrics)
 try:
-    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        Counter,
+        Gauge,
+        Histogram,
+        generate_latest,
+    )
     from starlette.responses import Response
 
     LLM_REQUEST_COUNTER = Counter(
@@ -43,10 +66,12 @@ try:
         "orcas_circuit_breaker_trips_total",
         "Times the circuit breaker opened"
     )
+    BREAKER_OPEN = Gauge("orcas_llm_breaker_open", "Whether the LLM breaker is open")
     PROM_AVAILABLE = True
 
     @app.get("/metrics")
     async def metrics():
+        BREAKER_OPEN.set(1 if breaker.get_state()[0] == "open" else 0)
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 except ImportError:
@@ -116,7 +141,9 @@ async def call_stub(request: ChatRequest) -> ChatResponse:
     """Forward request to stub service or generate canned fallback."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{config.STUB_SERVICE_URL}/v1/chat", json=request.model_dump())
+            headers = {"X-Correlation-ID": request.run_id} if request.run_id else {}
+            resp = await client.post(f"{config.STUB_SERVICE_URL}/v1/chat", json=request.model_dump(),
+                                     headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 return ChatResponse(**data)
@@ -155,7 +182,13 @@ async def chat_completion(request: ChatRequest):
 
     if config.ORCAS_STUB_MODE or not config.LLM_API_KEY:
         logger.info(f"Routing to stub (stub_mode={config.ORCAS_STUB_MODE}, has_key={bool(config.LLM_API_KEY)})")
-        return await call_stub(request)
+        res = await call_stub(request)
+        if PROM_AVAILABLE:
+            LLM_REQUEST_COUNTER.labels(agent=agent_label, model=res.model, status="stub").inc()
+            LLM_LATENCY_HISTOGRAM.labels(agent=agent_label, model=res.model).observe(time.time() - t0)
+            LLM_TOKEN_COUNTER.labels(agent=agent_label, model=res.model, direction="prompt").inc(res.usage.prompt_tokens)
+            LLM_TOKEN_COUNTER.labels(agent=agent_label, model=res.model, direction="completion").inc(res.usage.completion_tokens)
+        return res
 
     if not breaker.can_execute():
         logger.warning("Circuit breaker OPEN. Routing to fallback stub.")
@@ -164,6 +197,8 @@ async def chat_completion(request: ChatRequest):
             LLM_REQUEST_COUNTER.labels(agent=agent_label, model="fallback", status="breaker_open").inc()
         res = await call_stub(request)
         res.degraded = True
+        if PROM_AVAILABLE:
+            LLM_LATENCY_HISTOGRAM.labels(agent=agent_label, model=res.model).observe(time.time() - t0)
         return res
 
     target_model = request.model or config.LLM_MODEL
