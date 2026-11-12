@@ -1,12 +1,10 @@
 name: Compose failure drills
 
+# Long-running and resource-heavy, so it is started by hand: Actions tab, "Run workflow",
+# or `gh workflow run <file> --ref <branch>`. It used to trigger only on pushes to a feature
+# branch that has since been merged, which left it unreachable from main.
 on:
-  push:
-    branches:
-      - feat/jignas/demo-improvements
-    paths:
-      - .github/workflows/failure-drills.yml
-      - scripts/benchmarks/failure_drills.py
+  workflow_dispatch:
 
 env:
   POSTGRES_PASSWORD: ci-only-password
