@@ -26,7 +26,7 @@ flowchart TD
     
     DRAFT -->|Evidence Ledger + Draft| VERIFY{Independent Verifier}
     
-    subgraph Verifier ["Verifier Agent (Read-Only StateGraph)"]
+    subgraph Verifier ["Verifier Agent (separate class, read-only retrieval client)"]
         VERIFY -->|Check 1: Ledger Containment| CHK1[Check Chunk In Ledger]
         CHK1 -->|Check 2: Exact Quote Substring| CHK2[Verify Quote Span >= 20 chars]
         CHK2 -->|Check 3: Scope Card Guard| CHK3[Block Scope Card Citations]
@@ -36,7 +36,7 @@ flowchart TD
     
     CHK5 -->|Accepted| FILTER[Output Guardrails]
     CHK5 -->|Retry with Strategy| RETRY[Rotate Strategy & Re-Search]
-    RETRY --> PLAN
+    RETRY --> DRAFT
     CHK5 -->|Unverified after Max Retries| ESC[Escalate to Human]
     
     PLAN -->|Budget Exhausted / Out of Corpus| ESC
@@ -107,7 +107,8 @@ All bounds are configurable via environment variables and strictly audited befor
 | Failure Mode | Immediate Action | Resulting Status | Regulator | `degraded` Flag |
 |---|---|---|---|---|
 | Researcher LLM / Timeout | Catch `LLMUnavailable`, abort research | `escalated` (`agent_failure`) | `UNDETERMINED` | `true` |
-| Verifier Unavailable | Never return unverified draft | `escalated` (`verification_unavailable`) | `UNDETERMINED` | `true` |
+| Verifier Unavailable | Never return unverified draft | `escalated` (`verification_unavailable`) | As drafted | `true` |
+| Retrieval error, soft time limit or any other exception | Close the run at once; keep the draft's citations as partial findings | `escalated` (`agent_failure`) | As drafted, else `UNDETERMINED` | `true` |
 | Primary Gateway Trip | Breaker opens; invoke `LLM_FALLBACK_MODEL` | `completed` or `escalated` | As determined | `true` |
 | All LLM Retries Failed | Gateway returns HTTP 503 | `escalated` (`agent_failure`) | `UNDETERMINED` | `true` |
 | Out of Corpus Entity | Classify triggers early escalation | `escalated` (`out_of_corpus`) | `UNDETERMINED` | `false` |
@@ -130,10 +131,15 @@ Prompts are decoupled from code and loaded via `PromptLoader` with single-pass r
 - `researcher_reflect/v1.yaml` vs `v2.yaml`:
   - `v2` enables active modifier hunting across frameworks.
 
+- `researcher_classify/v3.yaml` is v2 plus `regulators_involved`, the field split-regulator escalation
+  reads. It is the default.
+
 ### Prompt Comparison Summary
-On the canonical evaluation scenarios:
-- `researcher_draft/v2` achieved **100% citation resolution validity** by mapping abstract evidence keys `[E#]` in code rather than relying on LLM verbatim hash replication.
-- `researcher_classify/v2` combined with `researcher_reflect/v2` correctly executed the §4.1 SEBI→RBI framework redirection without hard-coded python heuristics.
+No comparison on a live model has been run yet, so there is no measured result to report here. The two
+comparisons are pre-registered in `eval/experiments.yaml` (`l2-reflect-prompt`: reflect v1 against v2;
+`l3-cite-by-evidence-number`: draft v1 against v2) with their hypotheses and primary metrics, and
+`make experiment NAME=<name>` runs each. In stub mode draft v1 and v2 give identical outcomes on all 25
+scenarios, which shows the evidence-number mapping works end to end and says nothing about model quality.
 
 ---
 
@@ -141,16 +147,14 @@ On the canonical evaluation scenarios:
 
 Cost is calculated per-call in `services/llm_gateway/accounting.py` using equivalent list prices configurable via environment variables (`LLM_PRICE_INPUT_PER_M`, `LLM_PRICE_OUTPUT_PER_M`):
 
-1. **Equivalent List Pricing:**
-   - Free-tier hosted models (e.g. Gemini 1.5 Flash) bill $0.00 actual cost, but are recorded against equivalent market list prices ($0.075 / $0.30 per million tokens) to reflect production deployment costs.
-2. **Cost Breakdown by Step:**
-   - **Drafting (`researcher:draft`):** Represents ~55% of total run token consumption due to passing multi-passage evidence contexts.
-   - **Verification (`verifier:verify`):** Represents ~25% of token consumption for multi-claim audit.
-   - **Reflection (`researcher:reflect`):** Represents ~12% of token consumption.
-   - **Classification (`researcher:classify`):** Represents ~8% of token consumption.
-3. **Estimated Cost per 100 Runs:**
-   - Mean tokens per complaint run: ~2,800 prompt tokens, ~450 completion tokens.
-   - Equivalent list cost per 100 runs: **~$0.034 USD** (~₹2.85 INR), demonstrating high economic viability.
+1. **Equivalent list pricing:** a free-tier or local model bills nothing, so each call is costed at the
+   list prices set in the environment. Both default to 0; no model or price is fixed in the repository.
+2. **Where the figures come from:** every `llm_call` run event stores prompt tokens, completion tokens and
+   cost for its step. The metrics exporter publishes them as `orcas_run_tokens_by_step` and
+   `orcas_run_cost_by_step_usd`, and the "LLM tokens and cost by step" dashboard panel shows the split.
+3. **Measured so far:** stub mode only, where a run makes 3.2 LLM calls on average (25 evaluation
+   scenarios, 2026-11-12) and cost is zero. The share of tokens per step and the cost per 100 runs
+   depend on the model and are to be filled in from the live-model run.
 
 ---
 

@@ -70,24 +70,24 @@ needs. Hybrid showed no recall gain → off by default, available via `mode`.
   and escalation precision/recall; supporting passage retrieved / cited and intake rejection (label-based,
   no judge).
 
-**The agent, stub mode (`make eval`, 2026-11-03):**
+**The agent, stub mode (`make eval`, 2026-11-12):**
 
 | metric | all (25) | held-out (7) |
 |---|---|---|
-| answered | 6 | 2 |
+| answered | 18 | 4 |
 | groundedness / faithfulness | 1.000 / 1.000 | 1.000 / 1.000 |
-| context_relevance | 0.400 | 0.400 |
+| context_relevance | 0.561 | 0.450 |
 | hallucination_rate | 0.000 | 0.000 |
-| route / regulator / entity acc | 0.440 / 0.240 / 0.240 | 0.571 / 0.143 / 0.286 |
-| escalation precision / recall | 0.421 / 0.800 | 0.600 / 1.000 |
-| supporting passage retrieved / cited | 0.133 / 0.133 | 0.250 / 0.250 |
-| intake rejection recall / false rejections | 0.400 / 0 | 0.500 / 0 |
+| route / regulator / entity acc | 0.720 / 0.720 / 0.680 | 0.429 / 0.429 / 0.429 |
+| escalation precision / recall | 0.714 / 0.500 | 0.333 / 0.333 |
+| supporting passage retrieved / cited | 0.133 / 0.000 | 0.000 / 0.000 |
+| intake rejection recall / false rejections | 1.000 / 0 | 1.000 / 0 |
 
 Stub replies are canned, so these numbers describe the pipeline, not model quality. The judge scores the
-6 answers' single generic sentence as grounded; the label-based metrics show that only the two mutual-fund
-runs retrieved and cited their pinned passage (for §4.1, clause 10 "non-maintainability" ranks first for
-the agent's query and the deciding clause 9 seventh, below the agent's `k=5`). The gateway guardrail
-rejects 2 of the 5 injections. Live-model results follow once a model is reachable.
+answers' single generic sentence as grounded; the label-based metrics show that the pinned supporting
+passage is retrieved in 2 of 15 scenarios and cited in none. For §4.1 the agent routes to RBI and cites the
+scheme's preamble; the scenario pins clause 9, which the agent's `k=5` search does not return. The gateway
+guardrail rejects all 5 injections. No live-model results exist yet.
 
 **Keyword baseline (reference only, `make eval-baseline`):** groundedness 0.722, context relevance 0.900,
 faithfulness 0.833, hallucination 0.278, supporting passage retrieved 0.333; label metrics 0.880 (it mirrors
@@ -135,18 +135,18 @@ the label scheme but misses the three paraphrased injections).
 - **TruLens is a secondary view.** It scores the agent's runs with the same embedding judge through TruLens
   feedback primitives; its raw cosine scores are not comparable with the thresholded claim-level metrics,
   which stay primary.
-- **The retrieval Docker image was not built in-repo** (Docker daemon offline, limited disk) — Dockerfiles
-  and env wiring are validated; the image must be built on a Docker host / CI.
+- **The retrieval and ingest images are built and exercised only in CI** (the Compose smoke job builds them
+  and runs the reference case end to end); they have not been built on a team laptop.
 
 ## E. Definition of done (verified at freeze)
 
 | DoD item | Status |
 |---|---|
-| Unit tests + recall checks | ✅ `make test` → 60 passed |
+| Unit tests + recall checks | ✅ `make test` → 204 passed, 2 skipped (2026-11-12, index built) |
 | Metrics exposed | ✅ retrieval `/metrics` (`orcas_*`); `make eval` scores the agent and prints the four metrics, label metrics and supporting-passage hits |
 | Running log kept | ✅ `notes_tahir.md` (per-slice) |
 | Reproducible with a single `make` target | ✅ `make ingest` / `make eval` / `make test` |
 
-**Freeze:** Slices 0–7 shipped (PRs #2–#9 merged). Remaining open items are handoffs/integration owned
-jointly (wire live scorer to Jignas's Postgres + Grafana; swap Mitesh's agent in as the eval SUT; build
-the retrieval image in CI) — tracked in `notes_tahir.md`, not blocking Tahir's deliverables.
+**Freeze:** Slices 0–7 shipped (PRs #2–#9 merged). The three handoffs listed at freeze are done: the live
+scorer runs as the Compose `live-scorer` service, the agent is the evaluation SUT, and CI builds the
+retrieval image. Still open: a live-model evaluation run and the two pre-registered experiments.
