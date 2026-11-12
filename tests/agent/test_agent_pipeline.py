@@ -621,3 +621,122 @@ def test_prompt_injection_isolation(fake_retrieval):
     if result["status"] == "completed":
         assert result["verification"]["passed"] is True
     jsonschema.validate(instance=result, schema=DETERMINATION_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Failures other than LLMUnavailable end the run at once (M1, M16, J8)
+# ---------------------------------------------------------------------------
+
+COMPLAINT = {
+    "client_id": "test-client",
+    "is_synthetic": True,
+    "channel": "web",
+    "date_of_event": "2026-08-01",
+    "date_filed": "2026-09-01",
+    "text": "My broker refused to process my withdrawal.",
+}
+
+
+def _assert_degraded_escalation(store, run_id, result, reason_code="agent_failure"):
+    assert result["status"] == "escalated"
+    assert result["route"] == "escalate_to_human"
+    assert result["degraded"] is True
+    assert result["escalation"]["reason_code"] == reason_code
+    jsonschema.validate(instance=result, schema=DETERMINATION_SCHEMA)
+    assert store.get_run(run_id)["status"] == "escalated"
+    kinds = [event["kind"] for event in store.get_events(run_id)]
+    assert kinds[-2:] == ["degraded", "run_finished"]
+
+
+def test_retrieval_outage_escalates_instead_of_leaving_the_run_running(fake_llm):
+    import httpx
+
+    class DownRetrieval(FakeRetrievalClient):
+        def search(self, *args, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+    retrieval = DownRetrieval(fixtures_path=FIXTURES_PATH)
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=COMPLAINT, run_store=store,
+        researcher_graph=ResearcherGraph(llm_client=fake_llm, retrieval_client=retrieval),
+        verifier_graph=VerifierGraph(llm_client=fake_llm, retrieval_client=retrieval),
+    )
+
+    _assert_degraded_escalation(store, run_id, result)
+    assert "retrieval service was unavailable" in result["escalation"]["reason"]
+    assert "connection refused" not in result["escalation"]["reason"]
+
+
+def test_soft_time_limit_during_verification_escalates_with_the_draft_findings(
+        researcher_graph, fake_llm, fake_retrieval):
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    class SlowVerifier(VerifierGraph):
+        def verify(self, *args, **kwargs):
+            raise SoftTimeLimitExceeded()
+
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=COMPLAINT, run_store=store,
+        researcher_graph=researcher_graph,
+        verifier_graph=SlowVerifier(llm_client=fake_llm, retrieval_client=fake_retrieval),
+    )
+
+    _assert_degraded_escalation(store, run_id, result)
+    assert "time limit" in result["escalation"]["reason"]
+    assert result["escalation"]["partial_findings"], "the researcher's citations are kept"
+    assert result["citations"] == []
+
+
+def test_verifier_llm_outage_is_reported_as_verification_unavailable(
+        researcher_graph, fake_retrieval):
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=COMPLAINT, run_store=store,
+        researcher_graph=researcher_graph,
+        verifier_graph=VerifierGraph(llm_client=FakeLLMClient(unavailable=True),
+                                     retrieval_client=fake_retrieval),
+    )
+
+    _assert_degraded_escalation(store, run_id, result, "verification_unavailable")
+
+
+def test_researcher_returning_no_draft_escalates(researcher_graph, verifier_graph, monkeypatch):
+    monkeypatch.setattr(researcher_graph, "run", lambda **kwargs: None)
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=COMPLAINT, run_store=store,
+        researcher_graph=researcher_graph, verifier_graph=verifier_graph,
+    )
+
+    _assert_degraded_escalation(store, run_id, result)
+
+
+def test_wall_clock_limit_at_drafting_still_produces_a_determination(
+        fake_llm, fake_retrieval, monkeypatch):
+    """The limit is first crossed in the draft node, after research finished in time."""
+    graph = ResearcherGraph(llm_client=fake_llm, retrieval_client=fake_retrieval)
+    draft_node = graph.node_draft
+
+    def expired_at_draft(state):
+        state["budget"]["started_at"] = 0
+        return draft_node(state)
+
+    monkeypatch.setattr(graph, "node_draft", expired_at_draft)
+    graph.graph = graph._build_graph()
+
+    draft = graph.run(run_id=str(uuid.uuid4()), complaint_fields=COMPLAINT)
+
+    assert draft["status"] == "escalated"
+    assert draft["escalation"]["reason_code"] == "budget_exhausted"
+    jsonschema.validate(instance={k: v for k, v in draft.items() if not k.startswith("_")},
+                        schema=DETERMINATION_SCHEMA)

@@ -365,13 +365,12 @@ class ResearcherGraph:
 
         # Wall-clock check
         if self._wall_clock_exceeded(budget):
-            return {
-                "budget": budget,
-                "escalation": {
-                    "reason_code": "budget_exhausted",
-                    "reason": "Wall-clock limit exceeded before drafting.",
-                },
-            }
+            # The draft node leads straight to END, so build the escalation here; returning
+            # only an `escalation` key would end the graph with no determination at all.
+            return self.node_escalate({**state, "escalation": {
+                "reason_code": "budget_exhausted",
+                "reason": "Wall-clock limit exceeded before drafting.",
+            }})
 
         text = state["normalized_text"]
         classification = state.get("classification", {})
