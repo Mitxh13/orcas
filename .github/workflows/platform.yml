@@ -66,7 +66,7 @@ jobs:
       - name: Verify cross-service Jaeger trace
         run: python scripts/demo/check_jaeger_trace.py --timeout 90
       - name: Verify Prometheus data and Grafana provisioning
-        run: python scripts/demo/check_observability.py --timeout 90
+        run: python scripts/demo/check_observability.py --timeout 90 --resources require
       - name: Verify rejected input did not create a run
         run: |
           docker compose exec -T gateway python -c "import os, psycopg; connection = psycopg.connect(os.environ['DATABASE_URL']); counts = connection.execute('SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM quarantine)').fetchone(); assert counts == (1, 1), counts"

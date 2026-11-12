@@ -49,8 +49,11 @@ Every submission first consumes a Redis token from its source-IP bucket, before
 JSON parsing or quarantine. Invalid submissions also have an IP-keyed bucket;
 valid submissions have a second bucket keyed by source IP and `client_id`.
 This prevents changing `client_id` on every request from bypassing the intake
-limit. The default capacity of each bucket is 60 requests per minute. A limited request returns
-`429` with `Retry-After` and creates no run. The gateway exposes request
+limit. The invalid-input and per-client buckets hold 60 requests per minute
+(`RATE_LIMIT_PER_MIN`). The source-IP bucket holds 600 (`RATE_LIMIT_IP_PER_MIN`), because
+behind Docker Compose every client on the host shares one source address. A limited request
+returns `429` with `Retry-After` and creates no run. If Redis is unreachable the gateway
+answers `503` instead of accepting unmetered input. The gateway exposes request
 latency, status counts, and rate-limit rejections at `GET /metrics`.
 
 Completed determinations may be reused for an identical complaint from the
