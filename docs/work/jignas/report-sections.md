@@ -17,7 +17,7 @@ The gateway enforces the frozen complaint schema and cross-field date rules
 before creating a run. Invalid JSON, malformed fields, and guardrail matches
 are quarantined with a `422` response and do not dispatch a Celery task. The
 input guardrail uses conservative instruction and threat patterns; the labelled
-regression set includes 21 attack examples and 20 benign complaints. It flags
+regression set includes 27 attack examples and 20 benign complaints. It flags
 all labelled attacks and none of those 20 benign examples. This is a local
 regression result, not a field false-positive estimate. The
 [live Compose demo check](https://github.com/Mitxh13/orcas/actions/runs/40546391500)
@@ -51,7 +51,7 @@ The same payload mix was run at higher concurrency and with three worker
 replicas. Cache impact was measured with a warmup, repeated-input, and bypass
 mode at the same rate-limit setting.
 
-## Results and limitations
+## Historical results and limitations
 
 The [benchmark run](https://github.com/JignasP/orcas/actions/runs/40540516292)
 and [resource ramp](https://github.com/JignasP/orcas/actions/runs/40900547182)
@@ -123,8 +123,65 @@ assign an exact hit ratio to those 1,559 observations. The stub recorded
 production cost estimate. It cannot identify a monetary top driver, although
 the bypass window used 293,199 tokens and the repeat window recorded none.
 
-The [controlled failure run](https://github.com/JignasP/orcas/actions/runs/40542611618)
-observed a queued run completing after worker restart, HTTP `503` during a
-Redis outage followed by a completed new run, and a failed run during a
-retrieval outage followed by a completed new run after restart. Docker is
-unavailable on this workstation; these results are from clean hosted runners.
+## Repeat benchmark after the stub and intake fixes
+
+The [2026-11-11 CI benchmark](https://github.com/Mitxh13/orcas/actions/runs/43057185087)
+repeated the same 20 valid payloads, 1.5-second stub delay, ten-client baseline,
+three-worker phase, higher concurrency, and cache phases. The benchmark job
+passed, and every Locust phase had exit code zero and no request failures.
+The [CSV files, database snapshots, and summary](../../../loadtest/results/ci/summary.json)
+are committed under `loadtest/results/ci/`. The new IP-based intake limiter
+used `RATE_LIMIT_PER_MIN=100000` during this run: the old unique-client-ID
+workload did not effectively hit its 60-per-client limit, so the higher IP
+limit preserved an unthrottled agent workload for comparison.
+
+| Workload | Clients | Repeat observations | Repeat p50 | Repeat p95 | Repeat throughput | Completed / escalated / failed in database window | LLM calls per terminal run |
+|---|---:|---:|---:|---:|---:|---|---:|
+| Baseline, one worker | 10 | 380 | 22 s | 30 s | 0.417/s | 245 / 136 / 0 | 3.010 |
+| Scaled, three workers | 10 | 1,076 | 8.2 s | 11 s | 1.186/s | 719 / 359 / 0 | 3.130 |
+| Higher load, one worker | 20 | 144 | 46 s | 52 s | 0.414/s | 92 / 53 / 0 | 3.014 |
+| Higher load, one worker | 40 | 164 | 94 s | 104 s | 0.418/s | 104 / 61 / 0 | 2.958 |
+
+| Comparison | Earlier run | Repeat run |
+|---|---:|---:|
+| Ten-client p95 | 40 s | 30 s |
+| Ten-client completed / escalated in database window | 101 / 263 | 245 / 136 |
+| Ten-client LLM calls per terminal run | about 3.2 | 3.010 |
+| Three-worker ten-client p95 | 20 s | 11 s |
+| First measured SLO breach | 40 clients, p95 123 s | 40 clients, p95 104 s |
+
+The declared ten-client target passed again: p95 was 30 seconds against
+90 seconds, and all 380 Locust observations reached `completed` or
+`escalated` without a recorded failure. At 40 clients p95 still exceeded
+the target. The completion share in the ten-client database window rose
+from about 28% to about 64%, consistent with the stub routing fix, but
+escalation remains a valid terminal outcome rather than an automated
+resolution. Snapshot counts can differ from Locust observations by one or
+two runs crossing phase boundaries; the outcome columns are database-window
+deltas, not per-request labels. Calls per terminal run stayed near three,
+so this aggregate does not establish the roughly eleven-call path of a fully
+researched bank case. Per-scenario trace inspection is still needed for that
+claim. The new CI run did not capture per-service CPU or Grafana screenshots;
+the earlier Docker-stats ramp above remains the resource evidence.
+
+| Cache mode | Repeat observations | Repeat p50 | Repeat p95 | Throughput | LLM calls | Cache hits in database window |
+|---|---:|---:|---:|---:|---:|---:|
+| Repeated input after warmup | 1,631 | 0.081 s | 0.13 s | 9.110/s | 0 | 1,638 |
+| Same input with bypass | 78 | 23 s | 31 s | 0.383/s | 255 | 0 |
+
+The repeated-input p95 was about 238 times lower than bypassed input. The
+cache-repeat window recorded no new LLM calls or tokens. Its 1,638 cache-hit
+events are a window count, not an exact hit ratio for the 1,631 Locust
+observations. The stub recorded **$0 per 100 runs** in both runs; live-model
+cost per 100 runs remains unmeasured until a provider is configured.
+
+## Recovery checks
+
+The [updated recovery run](https://github.com/Mitxh13/orcas/actions/runs/43060243324)
+observed a queued run completing after worker restart, a mid-run worker kill
+reaching `escalated` after restart, HTTP `503` during a Redis outage followed
+by a completed new run, and an `agent_failure` degraded escalation during a
+retrieval outage followed by a completed new run after restart. The exact
+outcomes are [committed](../../../loadtest/results/ci/failure-drills.json).
+Docker is unavailable on this workstation; these results are from clean
+hosted runners.

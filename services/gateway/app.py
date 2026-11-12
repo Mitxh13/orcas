@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from anyio import from_thread
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -21,9 +22,10 @@ from libs.orcas_common.logging import configure_logging, correlation_id
 from libs.orcas_common.run_cache import RedisRunCache
 from libs.orcas_common.runstore import PostgresRunStore
 from libs.orcas_common.telemetry import configure_tracing
-from services.gateway.input_guardrails import check_free_text
+from services.gateway.input_guardrails import check_free_text, detect_abuse
 from services.gateway.metrics import (
     CACHE_LOOKUPS,
+    INPUT_ABUSE_DETECTIONS,
     LATENCY,
     RATE_LIMIT_REJECTIONS,
     REQUESTS,
@@ -113,11 +115,39 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
             "application/json": {"schema": Complaint.model_json_schema()}
         }}},
     )
-    async def submit(request: Request):
-        raw = await request.body()
+    def submit(request: Request):
+        # FastAPI runs synchronous endpoints in a worker thread. Only reading
+        # the ASGI body returns to the event loop; storage and queue calls do not.
+        raw = from_thread.run(request.body)
+        client_ip = request.client.host if request.client else "unknown"
+
+        def enforce_limit(bucket: str):
+            if limiter is None:
+                return None
+            try:
+                retry_after = limiter.retry_after(bucket)
+            except Exception:
+                logger.exception("rate limiter unavailable")
+                raise HTTPException(status_code=503, detail="rate limiter unavailable")
+            if retry_after:
+                RATE_LIMIT_REJECTIONS.inc()
+                return JSONResponse(
+                    status_code=429, content={"detail": "rate limit exceeded"},
+                    headers={"Retry-After": str(retry_after)},
+                )
+            return None
+
+        # This bucket protects parsing and quarantine even when client_id is
+        # missing, invalid, or changed on every request.
+        limited = enforce_limit(f"ip:{client_ip}")
+        if limited is not None:
+            return limited
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            limited = enforce_limit(f"invalid:{client_ip}")
+            if limited is not None:
+                return limited
             errors = [{"field": "body", "message": "invalid JSON", "type": "json_invalid"}]
             quarantine_id = store.quarantine(raw.decode("utf-8", errors="replace"), "validation", errors)
             return JSONResponse(status_code=422, content={"detail": errors, "quarantine_id": quarantine_id})
@@ -129,27 +159,29 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
             errors = _validation_errors(error)
             complaint = None
         if errors:
+            limited = enforce_limit(f"invalid:{client_ip}")
+            if limited is not None:
+                return limited
             quarantine_id = store.quarantine(data, "validation", errors)
             return JSONResponse(status_code=422, content={"detail": errors, "quarantine_id": quarantine_id})
 
         errors = check_free_text({"text": complaint.text, "entity_name_hint": complaint.entity_name_hint})
         if errors:
+            limited = enforce_limit(f"invalid:{client_ip}")
+            if limited is not None:
+                return limited
             reason = errors[0]["type"]
             quarantine_id = store.quarantine(data, reason, errors)
             return JSONResponse(status_code=422, content={"detail": errors, "quarantine_id": quarantine_id})
 
-        if limiter is not None:
-            try:
-                retry_after = limiter.retry_after(complaint.client_id)
-            except Exception:
-                logger.exception("rate limiter unavailable")
-                raise HTTPException(status_code=503, detail="rate limiter unavailable")
-            if retry_after:
-                RATE_LIMIT_REJECTIONS.inc()
-                return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"},
-                                    headers={"Retry-After": str(retry_after)})
+        limited = enforce_limit(f"client:{client_ip}:{complaint.client_id}")
+        if limited is not None:
+            return limited
 
         payload = complaint.model_dump(mode="json", exclude_none=True)
+        if detect_abuse({"text": complaint.text, "entity_name_hint": complaint.entity_name_hint}):
+            payload["_input_abuse_detected"] = True
+            INPUT_ABUSE_DETECTIONS.inc()
         cache_key = None
         if cache is not None and request.headers.get("X-Run-Cache-Bypass", "").lower() != "true":
             try:
@@ -170,6 +202,8 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
         if cache_key:
             payload["_cache_key"] = cache_key
         store.create_run(run_id, payload)
+        if payload.get("_input_abuse_detected"):
+            store.append_event(run_id, "gateway", "intake", "input_abuse_detected")
         if cached:
             cached = dict(cached)
             cached["run_id"] = run_id

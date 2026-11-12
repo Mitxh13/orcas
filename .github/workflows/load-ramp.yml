@@ -3,12 +3,16 @@ name: Complaint load ramp and resource diagnostics
 on:
   push:
     branches:
-      - feat/jignas/reliability-and-operations
+      - feat/jignas/demo-improvements
     paths:
       - .github/workflows/load-ramp.yml
       - scripts/benchmarks/ramp_experiment.sh
       - scripts/benchmarks/prometheus_range.py
       - scripts/benchmarks/docker_stats.py
+
+env:
+  POSTGRES_PASSWORD: ci-only-password
+  RATE_LIMIT_PER_MIN: 100000
 
 jobs:
   load-ramp:
@@ -26,7 +30,7 @@ jobs:
       - name: Install Locust
         run: pip install -r loadtest/requirements.txt
       - name: Build and start the stub-backed stack
-        run: docker compose up --build -d
+        run: docker compose --profile resources up --build -d
       - name: Wait for service readiness
         run: |
           for attempt in $(seq 1 60); do
@@ -51,4 +55,4 @@ jobs:
           docker compose logs --tail 100
       - name: Stop the stack
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile resources down -v

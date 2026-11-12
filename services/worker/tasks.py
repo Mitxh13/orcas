@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 from opentelemetry import propagate, trace
 
+from libs.orcas_common.config import celery_broker_url, celery_result_backend
 from libs.orcas_common.logging import configure_logging, correlation_id
 from libs.orcas_common.run_cache import RedisRunCache
 from libs.orcas_common.runstore import (
@@ -42,16 +43,19 @@ try:
 
     celery_app = Celery(
         "orcas",
-        broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
-        backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
+        broker=celery_broker_url(),
+        backend=celery_result_backend(),
     )
     celery_app.conf.task_acks_late = True
     celery_app.conf.task_default_queue = "orcas_tasks"
     celery_app.conf.task_reject_on_worker_lost = True
     celery_app.conf.worker_prefetch_multiplier = 1
-    celery_app.conf.broker_transport_options = {"visibility_timeout": 180}
+    celery_app.conf.broker_transport_options = {"visibility_timeout": _CELERY_HARD_LIMIT + 60}
     celery_app.conf.task_soft_time_limit = _CELERY_SOFT_LIMIT
     celery_app.conf.task_time_limit = _CELERY_HARD_LIMIT
+    celery_app.conf.beat_schedule = {
+        "sweep-stale-runs": {"task": "orcas.sweep_stale_runs", "schedule": 60.0},
+    }
     configure_tracing("worker", instrument_httpx=True)
 
     @celery_app.task(name="orcas.run_complaint", bind=True, max_retries=0, acks_late=True)
@@ -63,14 +67,22 @@ try:
             context = propagate.extract(self.request.headers or {})
             with trace.get_tracer(__name__).start_as_current_span(
                 "worker.run_complaint", context=context
-            ):
-                return run_complaint_pipeline(run_id=run_id)
+            ) as span:
+                span.set_attribute("orcas.run_id", run_id)
+                delivery_info = self.request.delivery_info or {}
+                return run_complaint_pipeline(
+                    run_id=run_id, redelivered=bool(delivery_info.get("redelivered")),
+                )
         finally:
             correlation_id.reset(token)
 
+    @celery_app.task(name="orcas.sweep_stale_runs")
+    def sweep_stale_runs_task() -> int:
+        return sweep_stale_runs(PostgresRunStore())
+
 except ImportError as exc:
     if getattr(exc, "name", None) != "celery":
-        pass
+        raise
     celery_app = None
     logger.info("Celery not installed; run_complaint_pipeline available as plain function.")
 
@@ -133,6 +145,24 @@ def _build_degraded_escalation(
     return _strip_internal(base)
 
 
+def sweep_stale_runs(store: RunStore, max_age_s: int | None = None) -> int:
+    """End orphaned runs after the worker hard limit and a recovery margin."""
+    max_age_s = max_age_s or int(os.getenv("CELERY_TIME_LIMIT", "180")) + 60
+    count = 0
+    for run_id in store.stale_running_runs(max_age_s):
+        escalation = _build_degraded_escalation(
+            run_id, None, "agent_failure", "worker attempt exceeded its time limit", [],
+        )
+        store.complete(run_id, escalation)
+        if store.get_run(run_id).get("result") == escalation:
+            store.append_event(
+                run_id, "system", "recovery", "run_finished",
+                payload={"status": "escalated", "reason_code": "agent_failure", "degraded": True},
+            )
+            count += 1
+    return count
+
+
 def run_complaint_pipeline(
     run_id: str,
     complaint_data: Optional[Dict[str, Any]] = None,
@@ -140,6 +170,7 @@ def run_complaint_pipeline(
     researcher_graph: Optional[ResearcherGraph] = None,
     verifier_graph: Optional[VerifierGraph] = None,
     inject_bad_draft: bool = False,
+    redelivered: bool = False,
 ) -> Dict[str, Any]:
     """
     Complete multi-agent pipeline:
@@ -190,7 +221,7 @@ def run_complaint_pipeline(
 
     if record.get("status") in TERMINAL:
         return record.get("result") or record
-    if hasattr(store, "claim_run") and not store.claim_run(run_id):
+    if hasattr(store, "claim_run") and not store.claim_run(run_id, redelivered=redelivered):
         return store.get_run(run_id)
 
     store.update_status(run_id, "running")
@@ -204,6 +235,7 @@ def run_complaint_pipeline(
 
     complaint_payload = dict(record.get("payload", {}))
     cache_key = complaint_payload.pop("_cache_key", None)
+    complaint_payload.pop("_input_abuse_detected", None)
     draft: Optional[Dict[str, Any]] = None
     partial_findings: list = []
 

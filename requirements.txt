@@ -1,24 +1,24 @@
-# ORCAS — Tahir's services (ingest + retrieval) and eval. Pinned loosely for v0.
+# ORCAS retrieval, ingest, and evaluation dependencies.
 # Install: python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
 
 # Retrieval + ingest
-chromadb>=0.5,<0.6
-sentence-transformers>=2.7,<4
-pypdf>=4.2
-pyyaml>=6.0
-rank-bm25>=0.2.2
-langchain-core>=0.3,<2  # retrieval orchestration (L1)
+chromadb==0.5.23
+sentence-transformers==3.4.1
+pypdf==4.3.1
+pyyaml==6.0.3
+rank-bm25==0.2.2
+langchain-core==1.7.0  # retrieval orchestration (L1)
 
 # Retrieval service API
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.6
-prometheus-client>=0.20
-redis>=5  # retrieval cache backend (used only when REDIS_URL is set)
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+prometheus-client==0.26.0
+redis==6.4.0  # retrieval cache backend (used only when REDIS_URL is set)
 
 # Evaluation
-trulens-core>=1.0
+trulens-core==2.16.0
 
 # Tests
-pytest>=8.0
-httpx>=0.27
+pytest==9.1.1
+httpx==0.28.1

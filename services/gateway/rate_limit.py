@@ -1,4 +1,4 @@
-"""Atomic per-client token bucket backed by Redis."""
+"""Atomic named token buckets backed by Redis."""
 
 from __future__ import annotations
 
@@ -35,9 +35,9 @@ class RedisRateLimiter:
         self.redis = redis.Redis.from_url(url, socket_timeout=2)
         self.per_minute = per_minute
 
-    def retry_after(self, client_id: str) -> int:
+    def retry_after(self, bucket: str) -> int:
         """Return zero when allowed, otherwise whole seconds until another token."""
         seconds = self.redis.eval(
-            _TAKE_TOKEN, 1, f"orcas:rate:{client_id}", time.time(), self.per_minute,
+            _TAKE_TOKEN, 1, f"orcas:rate:{bucket}", time.time(), self.per_minute,
         )
         return max(0, math.ceil(int(seconds)))

@@ -128,7 +128,7 @@ Services: `gateway, worker, retrieval, llm-gateway, llm-stub (profile), ingest (
 | 44–50 | Rehearsal of all 10 demo items with a stopwatch; bug fixes only. | Dress rehearsal passes twice |
 
 ## 5. Definition of done
-1. `docker compose up` from a clean clone. 2. Tests (contract, validation, integration). 3. Metrics on `/metrics`. 4. Structured logs with correlation ID. 5. Documented in `docs/work/notes_jignas.md` (running log).
+1. `docker compose up` from a clean clone. 2. Tests (contract, validation, integration). 3. Metrics on `/metrics`. 4. Structured logs with correlation ID. 5. Documented in `docs/work/jignas/notes_jignas.md` (running log).
 
 ## 6. Demo items you drive
 - **#1** compose up from clean clone

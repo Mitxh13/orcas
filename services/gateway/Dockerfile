@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.18-slim
 
 WORKDIR /app
 COPY services/gateway/requirements.txt /app/requirements.txt

@@ -209,7 +209,7 @@ Feedback endpoint (J), aggregation, live scorer samples N% of completed runs (T)
 `gateway, worker, retrieval, llm-gateway, llm-stub, ingest, web, redis, postgres, prometheus, grafana, otel-collector, jaeger, cadvisor` (14 containers; ≥4 required). Boundary justification in `ARCHITECTURE.md §2.1`.
 
 ### 8.2 Configuration (D4)
-All config via env. Documented variables (in `.env.example`, no values for secrets): `LLM_PROVIDER, LLM_MODEL, LLM_API_KEY, LLM_FALLBACK_MODEL, EMBED_MODEL, POSTGRES_*, REDIS_URL, MAX_STEPS, MAX_TOOL_CALLS, RUN_WALL_CLOCK_S, MAX_VERIFY_RETRIES, RATE_LIMIT_PER_MIN, RUN_CACHE_TTL_S, BREAKER_FAILURES, BREAKER_COOLDOWN_S, LIVE_SCORE_SAMPLE_RATE, OTEL_EXPORTER_OTLP_ENDPOINT`. CI fails on committed keys or hard-coded model names.
+All config via env. Documented variables (in `.env.example`, no values for secrets): `LLM_PROVIDER, LLM_MODEL, LLM_API_KEY, LLM_FALLBACK_MODEL, EMBED_MODEL, POSTGRES_*, REDIS_URL, MAX_STEPS, MAX_TOOL_CALLS, RUN_WALL_CLOCK_S, MAX_VERIFY_RETRIES, RATE_LIMIT_PER_MIN, RUN_CACHE_TTL_S, BREAKER_FAILURES, BREAKER_COOLDOWN_S, LIVE_SCORE_SAMPLE_RATE, OTEL_EXPORTER_OTLP_ENDPOINT`. CI scans tracked files for key formats and code, prompt, and Compose files for provider/model identifiers. The local embedding model is the documented exception.
 
 ### 8.3 Caching (D7)
 | Cache | Key | Justification |
@@ -253,14 +253,16 @@ Locust, LLM replaced by stub; ramp 1 → 5 → 10 → 20 → 40 concurrent users
 |---|---|---|---|
 | 1 | Clean clone → working system | J | `docker compose up --build` |
 | 2 | Valid request → routed result, citations resolve | T | Web client preset |
-| 3 | End-to-end trace | J | Jaeger + `/v1/runs/{id}/trace` |
-| 4 | Malformed → rejected + quarantined, no run | J | `scripts/demo/malformed.sh` |
-| 5 | Unanswerable → escalation | M | `scripts/demo/out_of_corpus.sh` |
-| 6 | Verifier catches unsupported answer | M | `ORCAS_INJECT_BAD_DRAFT=1` |
-| 7 | Injection attempt blocked | J + M | `scripts/demo/injection.sh` |
+| 3 | End-to-end trace | J | `python scripts/demo/show_trace.py <run_id>` |
+| 4 | Malformed → rejected + quarantined, no run | J | `python scripts/demo/initial_demo.py` |
+| 5 | Unanswerable → escalation | M | `bash scripts/demo/demo_5_out_of_corpus.sh` |
+| 6 | Verifier catches unsupported answer | M | `bash scripts/demo/demo_6_bad_draft.sh` |
+| 7 | Injection attempt blocked | J + M | `python scripts/demo/check_guardrail_rejection.py` |
 | 8 | Breaker opens, degradation | M | `scripts/demo/kill_provider.sh` |
 | 9 | Locust vs target; failure concurrency; `--scale` | J | `make loadtest` |
 | 10 | §4.1 case | M + T | Web client preset "bank FD" |
+
+Exact commands, expected evidence, and fallbacks: [DEMO.md](DEMO.md).
 
 ## 12. Timeline (50 days)
 

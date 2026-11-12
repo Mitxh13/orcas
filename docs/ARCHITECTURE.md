@@ -35,6 +35,7 @@ flowchart LR
     W -->|"search / clause / chunk"| RS["retrieval<br/>FastAPI + Chroma"]
     W -->|"chat"| LG["llm-gateway<br/>breaker, backoff, cost"]
     LG -->|"profile: live"| PROV["Free-tier LLM provider"]
+    LG -->|"profile: ollama"| OLL["ollama<br/>local model volume"]
     LG -->|"stub mode"| STUB["llm-stub<br/>fixed reply + delay"]
     LG --> Q
 
@@ -47,6 +48,7 @@ flowchart LR
         P["prometheus"] --> G["grafana"]
         CA["cadvisor"] --> P
         WM["worker-metrics"] --> P
+        LS["live-scorer"] --> PG
     end
     GW -.-> OT
     W -.-> OT
@@ -74,7 +76,10 @@ A deployment boundary is the unit that is built, scaled, restarted and released 
 | **web** | *Independent release.* Static client; no business logic. |
 | **redis / postgres** | *State separation.* Redis = ephemeral (queue, cache, rate limit, breaker). Postgres = durable (runs, events, quarantine, feedback). |
 | **worker-metrics** | *Read-only metrics adapter.* Queries persisted events and queue depth for run KPIs without embedding an HTTP server in every Celery process. |
-| **prometheus / grafana / otel-collector / jaeger / cadvisor** | *Observability plane*, separate from the data plane so monitoring survives application failure. |
+| **worker-scheduler** | *Recovery timer.* Dispatches a stale-run sweep every minute. |
+| **live-scorer** | *Quality sampling.* Scores completed runs from Postgres and records sampled metrics. |
+| **ollama** | *Optional local model.* Enabled with the `ollama` Compose profile and backed by a model volume. |
+| **prometheus / grafana / otel-collector / jaeger / cadvisor** | *Observability plane*, separate from the data plane so monitoring survives application failure. cAdvisor uses the optional `resources` profile. |
 
 The gateway validates before creating a run or queue message. Redis uses
 separate databases for cache/rate limit, Celery broker, and Celery results.
@@ -231,8 +236,8 @@ Every degraded or retried path sets flags that surface in the result (`degraded`
 
 | Store | Content | Notes |
 |---|---|---|
-| Postgres `runs` | run_id, client_id, status, payload hash, result JSON, prompt versions, index_version, timestamps | Source of truth for the API |
-| Postgres `run_events` | run_id, seq, ts, agent, step, kind (llm_call/tool_call/verify/…), query, passages, latency, tokens, cost | Enables the "reconstruct from run_id" requirement |
+| Postgres `runs` | run_id, status, payload JSON, submitted_at, started_at, finished_at, result JSON, error | Source of truth for the API; client ID, prompt versions and index version live inside JSON fields |
+| Postgres `run_events` | run_id, seq, ts, agent, step, kind, latency_ms, payload JSON, tokens JSON, cost_usd | Enables the "reconstruct from run_id" requirement |
 | Postgres `quarantine` | raw record, field-level errors, reason, ts | Rejected input; *no run row exists* |
 | Postgres `feedback` | run_id, rating, reason, ts | L6 |
 | Postgres `eval_scores` | sampled live runs and their metric scores | L6 chart |
@@ -241,10 +246,10 @@ Every degraded or retried path sets flags that surface in the result (`degraded`
 
 ## 8. Observability
 
-- **Logs**: JSON, fields `ts, level, service, correlation_id, run_id, agent, step, event, latency_ms`.
-- **Correlation ID**: created at gateway (or accepted from `X-Correlation-ID`), propagated via HTTP header, Celery headers and OTel baggage; equals the `run_id` for run-level work.
+- **Logs**: JSON fields `timestamp`, `level`, `logger`, `message`, and `correlation_id`; an `exception` field is added for logged errors. Agent, step, latency and cost live in persisted run events.
+- **Correlation ID**: created at gateway (or accepted from `X-Correlation-ID`), propagated via HTTP and Celery headers; equals the `run_id` for run-level work.
 - **Tracing**: OpenTelemetry SDK in all four Python services → collector → Jaeger. One trace per run; spans per agent step, tool call and LLM call.
-- **Metrics (Prometheus, `orcas_` prefix)**: request rate/latency histograms, run end-to-end latency, per-step latency, runs by outcome, steps and tool calls per run, retry count, breaker state, LLM tokens and cost by step, cache hit ratio, queue depth, ingest throughput, index freshness, chunk count.
+- **Metrics (Prometheus, `orcas_` prefix)**: request rate/latency histograms, run end-to-end latency, per-agent steps, tool calls, success ratio and step latency, retry rate, escalation reasons, degraded runs, breaker state, LLM tokens and cost by step, cache hit ratio, queue depth, index freshness and chunk count.
 - **Dashboards (Grafana)**: p50/p95 latency, error rate, throughput, availability, container CPU/memory (cAdvisor), agent KPIs (A6), cost panel (L5), quality over time (L6), index freshness.
 - **Reconstruction**: `GET /v1/runs/{id}/trace` returns the ordered `run_events` including every query, passage, prompt version, per-step latency and cost, and the verification outcome.
 
@@ -252,7 +257,7 @@ Every degraded or retried path sets flags that surface in the result (`degraded`
 
 | Layer | Control | Owner |
 |---|---|---|
-| Ingestion | Prompt-injection heuristics + classifier on every free-text field; toxicity check; length and character limits; rejects go to quarantine | Jignas |
+| Ingestion | Prompt-injection patterns on every free-text field, explicit-threat rejection, abusive-language detection without rejection, length and character limits; rejects go to quarantine | Jignas |
 | Prompting | Untrusted text delimited and labelled as data; tools never receive raw complaint text as instructions; tool args validated | Mitesh |
 | Tools | Read-only tools only; no tool can change a determination or write outside the run | Mitesh |
 | Output | Output filter: allowed `route` enum only, `disposed=false` enforced, forbidden phrases ("approved", "resolved", "compensation granted") blocked; toxicity check on output | Mitesh |

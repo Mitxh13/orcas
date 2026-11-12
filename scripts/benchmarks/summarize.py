@@ -22,6 +22,10 @@ def summarize(directory: Path) -> dict:
         before = json.loads((directory / f"{name}_before.json").read_text())
         after = json.loads((directory / f"{name}_after.json").read_text())
         row = end_to_end_row(csv_path)
+        terminal_delta = sum(
+            after["statuses"].get(status, 0) - before["statuses"].get(status, 0)
+            for status in ("completed", "escalated", "failed")
+        )
         result[name] = {
             "end_to_end": row,
             "locust_exit_code": int((directory / f"{name}.exit_code").read_text()),
@@ -29,6 +33,9 @@ def summarize(directory: Path) -> dict:
             "escalated_delta": after["statuses"].get("escalated", 0) - before["statuses"].get("escalated", 0),
             "failed_delta": after["statuses"].get("failed", 0) - before["statuses"].get("failed", 0),
             "llm_calls_delta": after["llm_calls"] - before["llm_calls"],
+            "llm_calls_per_terminal_run": round(
+                (after["llm_calls"] - before["llm_calls"]) / terminal_delta, 3
+            ) if terminal_delta else None,
             "tokens_delta": after["tokens"] - before["tokens"],
             "cost_usd_delta": after["cost_usd"] - before["cost_usd"],
             "cache_hits_delta": after["cache_hits"] - before["cache_hits"],

@@ -4,12 +4,15 @@ on:
   push:
   pull_request:
 
+env:
+  POSTGRES_PASSWORD: ci-only-password
+
 jobs:
   platform:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16.15-alpine
         env:
           POSTGRES_USER: orcas
           POSTGRES_PASSWORD: test-only
@@ -29,11 +32,11 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install test dependencies
-        run: pip install -r services/gateway/requirements.txt langgraph pyyaml jsonschema pytest httpx ruff redis
+        run: pip install -r requirements-dev.txt
       - name: Lint platform code
         run: ruff check --isolated --select E4,E7,E9,F,I libs services/gateway services/metrics_exporter services/worker/tasks.py services/worker/clients/retrieval.py services/worker/clients/observed_retrieval.py services/worker/clients/llm_client.py services/retrieval/app.py services/llm_gateway/app.py scripts/doctor.py scripts/check_repository.py scripts/demo scripts/benchmarks loadtest/locustfile.py tests/platform
-      - name: Test platform and agent
-        run: python -m pytest tests/platform tests/agent tests/web -q
+      - name: Test services and contracts
+        run: python -m pytest tests -q
       - name: Check tracked configuration and credentials
         run: python scripts/check_repository.py
       - name: Compile load and operations scripts
@@ -42,14 +45,14 @@ jobs:
         run: docker compose config --quiet
 
   compose-smoke:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: platform
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Build and start the stub-backed stack
-        run: docker compose up --build -d
+        run: docker compose --profile resources up --build -d
       - name: Wait for service readiness
         run: |
           for attempt in $(seq 1 60); do
@@ -78,4 +81,4 @@ jobs:
           docker compose logs --tail 100
       - name: Stop the stack
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile resources down -v

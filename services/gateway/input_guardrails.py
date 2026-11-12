@@ -11,11 +11,23 @@ _INJECTION = (
     re.compile(r"\byou are now\s+(?:an?\s+)?(?:unrestricted|unfiltered|uncensored|jailbroken)\s+assistant\b", re.I),
     re.compile(r"(?:<\|im_start\|>|\[/?INST\]|<\|system\|>|</?system>)", re.I),
     re.compile(r"\b(?:bypass|disable)\s+(?:the\s+|all\s+)?(?:safety|guardrails?|verification|filters?)\b", re.I),
+    re.compile(r"\bforget\s+(?:everything|all\s+(?:the\s+)?(?:above|previous)|(?:the\s+)?previous\s+instructions?)\b", re.I),
+    re.compile(r"\b(?:system|admin)\s+note\s*:", re.I),
+    re.compile(r"\byou\s+must\s+now\s+(?:route|classify|mark|output|approve|reject|ignore|skip)\b", re.I),
+    re.compile(r'["\'](?:route|disposed|regulator|verification)["\']\s*:', re.I),
+    re.compile(r"\b(?:tell|instruct|force|make)\s+(?:the\s+)?(?:verifier|guardrails?|system\s+prompt)\s+to\b", re.I),
+    re.compile(r"\b(?:verifier|guardrails?)\s*:\s*(?:ignore|skip|disable|approve|accept)\b", re.I),
 )
 _TOXICITY = (
     re.compile(r"\b(?:i|we)\s+(?:will|am going to)\s+(?:kill|murder|hurt)\s+(?:you|them|the staff|the officer)\b", re.I),
     re.compile(r"\b(?:kill|murder)\s+(?:all|every)\s+(?:bank|company|office)\s+(?:staff|employees|workers)\b", re.I),
 )
+_ABUSE = re.compile(r"\b(?:idiot|moron|stupid|incompetent|useless)\b", re.I)
+
+
+def detect_abuse(fields: dict[str, str | None]) -> bool:
+    """Record abusive language without rejecting an otherwise valid complaint."""
+    return any(_ABUSE.search(value) for value in fields.values() if value)
 
 
 def check_free_text(fields: dict[str, str | None]) -> list[dict[str, str]]:

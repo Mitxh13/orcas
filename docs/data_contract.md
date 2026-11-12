@@ -31,8 +31,10 @@ complaint text through a public endpoint.
 The gateway screens `text` and `entity_name_hint` for explicit instructions to the
 agent and threats after schema validation and before creating a run. Flagged requests
 also return `422` and are quarantined with `guardrail:injection` or
-`guardrail:toxicity`. The current labelled set contains 20 attack examples and 20
-benign complaints; 0 of the 20 benign examples were flagged. This small set is a
+`guardrail:toxicity`. The current labelled set contains 27 attack examples and 20
+benign complaints; 27 of 27 attacks were caught and 0 of 20 benign examples
+were rejected. Abusive language is recorded in the run payload and an intake
+event and metric without rejecting the complaint. This small set is a
 regression check, not an estimate of production false-positive rate.
 
 `GET /v1/runs/{run_id}/trace` returns ordered persisted events and their total
@@ -43,8 +45,11 @@ and feedback totals are available at `GET /v1/admin/quarantine` and
 `Authorization: Bearer <ORCAS_ADMIN_TOKEN>` and are unavailable until that
 environment variable is configured.
 
-Valid submissions are limited by a Redis token bucket for each `client_id`.
-The default capacity is 60 requests per minute. A rejected request returns
+Every submission first consumes a Redis token from its source-IP bucket, before
+JSON parsing or quarantine. Invalid submissions also have an IP-keyed bucket;
+valid submissions have a second bucket keyed by source IP and `client_id`.
+This prevents changing `client_id` on every request from bypassing the intake
+limit. The default capacity of each bucket is 60 requests per minute. A limited request returns
 `429` with `Retry-After` and creates no run. The gateway exposes request
 latency, status counts, and rate-limit rejections at `GET /metrics`.
 

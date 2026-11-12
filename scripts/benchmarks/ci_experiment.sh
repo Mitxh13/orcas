@@ -22,6 +22,7 @@ run_locust() {
   snapshot "${name}_after"
   echo "$name: Locust exit code $exit_code"
   tail -n 12 "$results/$name.log"
+  return "$exit_code"
 }
 
 python scripts/demo/initial_demo.py --timeout 180

@@ -34,29 +34,63 @@ def collect_snapshot() -> dict:
             "COUNT(*) FILTER (WHERE kind = 'llm_call'), "
             "COALESCE(SUM((tokens->>'prompt')::int), 0), "
             "COALESCE(SUM((tokens->>'completion')::int), 0), "
-            "COALESCE(SUM(cost_usd), 0) FROM run_events"
+            "COALESCE(SUM(cost_usd), 0) FROM run_events "
+            "WHERE ts > NOW() - INTERVAL '1 hour'"
         ).fetchone()
+        uncached_terminal = connection.execute(
+            "SELECT COUNT(*) FROM runs r WHERE r.finished_at > NOW() - INTERVAL '1 hour' "
+            "AND NOT EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.run_id AND e.kind = 'cache_hit')"
+        ).fetchone()[0]
+        escalations = connection.execute(
+            "SELECT result->'escalation'->>'reason_code', COUNT(*) FROM runs "
+            "WHERE status = 'escalated' AND finished_at > NOW() - INTERVAL '1 hour' "
+            "GROUP BY result->'escalation'->>'reason_code'"
+        ).fetchall()
+        degraded = connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE result->>'degraded' = 'true' "
+            "AND finished_at > NOW() - INTERVAL '1 hour'"
+        ).fetchone()[0]
+        agent_rows = connection.execute(
+            "SELECT agent, COUNT(DISTINCT run_id), COUNT(*), "
+            "COUNT(*) FILTER (WHERE kind = 'tool_call'), "
+            "COUNT(*) FILTER (WHERE kind IN ('draft', 'verify')), "
+            "COUNT(*) FILTER (WHERE kind = 'draft' OR "
+            "(kind = 'verify' AND payload->>'passed' = 'true')) "
+            "FROM run_events WHERE agent IN ('researcher', 'verifier') "
+            "AND ts > NOW() - INTERVAL '1 hour' GROUP BY agent"
+        ).fetchall()
         feedback = dict(connection.execute(
             "SELECT rating, COUNT(*) FROM feedback GROUP BY rating"
         ).fetchall())
         scores = dict(connection.execute(
-            "SELECT metric, AVG(score) FROM eval_scores GROUP BY metric"
+            "SELECT metric, AVG(score) FROM eval_scores "
+            "WHERE measured_at > NOW() - INTERVAL '1 hour' GROUP BY metric"
         ).fetchall())
         step_latency = connection.execute(
             "SELECT step, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms), "
             "percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) "
-            "FROM run_events WHERE latency_ms > 0 GROUP BY step"
+            "FROM run_events WHERE latency_ms > 0 "
+            "AND ts > NOW() - INTERVAL '1 hour' GROUP BY step"
+        ).fetchall()
+        agent_step_latency = connection.execute(
+            "SELECT agent, step, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) "
+            "FROM run_events WHERE agent IN ('researcher', 'verifier') "
+            "AND latency_ms > 0 AND ts > NOW() - INTERVAL '1 hour' "
+            "GROUP BY agent, step"
         ).fetchall()
         llm_by_step = connection.execute(
             "SELECT step, COALESCE(SUM((tokens->>'prompt')::int), 0), "
             "COALESCE(SUM((tokens->>'completion')::int), 0), "
             "COALESCE(SUM(cost_usd), 0) "
-            "FROM run_events WHERE kind = 'llm_call' GROUP BY step"
+            "FROM run_events WHERE kind = 'llm_call' "
+            "AND ts > NOW() - INTERVAL '1 hour' GROUP BY step"
         ).fetchall()
     queue_depth = redis.Redis.from_url(os.environ["REDIS_URL"], socket_timeout=2).llen("orcas_tasks")
     return {"statuses": statuses, "latency": latency, "events": events,
             "feedback": feedback, "scores": scores, "step_latency": step_latency,
-            "llm_by_step": llm_by_step,
+            "llm_by_step": llm_by_step, "uncached_terminal": uncached_terminal,
+            "escalations": escalations, "degraded": degraded, "agent_rows": agent_rows,
+            "agent_step_latency": agent_step_latency,
             "queue_depth": queue_depth}
 
 
@@ -95,14 +129,35 @@ def render_metrics(snapshot: dict) -> bytes:
         step_cost.labels(name).set(float(cost))
     gauge("orcas_run_cost_usd", "Persisted LLM cost in USD").set(float(cost_usd or 0))
     gauge("orcas_cost_per_100_runs_usd", "Persisted LLM cost per 100 terminal runs").set(
-        float(cost_usd or 0) * 100 / terminal if terminal else 0
+        float(cost_usd or 0) * 100 / snapshot.get("uncached_terminal", terminal)
+        if snapshot.get("uncached_terminal", terminal) else 0
     )
     gauge("orcas_run_steps_per_run", "Average persisted work events per run").set(
-        ((retries or 0) + (tool_calls or 0) + (llm_calls or 0)) / terminal if terminal else 0
+        ((retries or 0) + (tool_calls or 0) + (llm_calls or 0)) /
+        snapshot.get("uncached_terminal", terminal) if snapshot.get("uncached_terminal", terminal) else 0
     )
     gauge("orcas_run_tool_calls_per_run", "Average persisted tool calls per run").set(
-        (tool_calls or 0) / terminal if terminal else 0
+        (tool_calls or 0) / snapshot.get("uncached_terminal", terminal)
+        if snapshot.get("uncached_terminal", terminal) else 0
     )
+    gauge("orcas_run_retry_rate", "Retries per uncached terminal run in the last hour").set(
+        (retries or 0) / snapshot.get("uncached_terminal", terminal)
+        if snapshot.get("uncached_terminal", terminal) else 0
+    )
+    reason_gauge = gauge("orcas_run_escalation_reason", "Escalations in the last hour", ["reason"])
+    for reason, count in snapshot.get("escalations", []):
+        reason_gauge.labels(reason or "unknown").set(count)
+    gauge("orcas_run_degraded", "Degraded runs in the last hour").set(snapshot.get("degraded", 0))
+    agent_success = gauge("orcas_agent_success_ratio", "Successful draft or verification events", ["agent"])
+    agent_steps = gauge("orcas_agent_steps_per_run", "Agent events per run in the last hour", ["agent"])
+    agent_tools = gauge("orcas_agent_tool_calls_per_run", "Agent tool calls per run in the last hour", ["agent"])
+    for agent, runs, steps, tools, attempts, successes in snapshot.get("agent_rows", []):
+        agent_success.labels(agent).set(successes / attempts if attempts else 0)
+        agent_steps.labels(agent).set(steps / runs if runs else 0)
+        agent_tools.labels(agent).set(tools / runs if runs else 0)
+    agent_latency = gauge("orcas_agent_step_latency_seconds", "Agent step p95 latency", ["agent", "step"])
+    for agent, name, p95 in snapshot.get("agent_step_latency", []):
+        agent_latency.labels(agent, name).set(float(p95 or 0) / 1000)
     gauge("orcas_celery_queue_depth", "Waiting Celery tasks in Redis").set(snapshot["queue_depth"])
 
     feedback = gauge("orcas_feedback", "Persisted feedback ratings", ["rating"])
@@ -126,7 +181,9 @@ def health():
 @app.get("/ready")
 def ready():
     try:
-        collect_snapshot()
+        with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
+            connection.execute("SELECT 1")
+        redis.Redis.from_url(os.environ["REDIS_URL"], socket_timeout=2).ping()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="metrics dependencies unavailable") from exc
     return {"status": "ok"}

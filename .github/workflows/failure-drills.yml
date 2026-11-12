@@ -3,10 +3,13 @@ name: Compose failure drills
 on:
   push:
     branches:
-      - feat/jignas/reliability-and-operations
+      - feat/jignas/demo-improvements
     paths:
       - .github/workflows/failure-drills.yml
       - scripts/benchmarks/failure_drills.py
+
+env:
+  POSTGRES_PASSWORD: ci-only-password
 
 jobs:
   failure-drills:
@@ -15,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and start the stub-backed stack
-        run: docker compose up --build -d
+        run: docker compose --profile resources up --build -d
       - name: Wait for service readiness
         run: |
           for attempt in $(seq 1 60); do
@@ -42,4 +45,4 @@ jobs:
           docker compose logs --tail 100
       - name: Stop the stack
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile resources down -v

@@ -1,9 +1,9 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orcas}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orcas_demo_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-orcas}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -14,7 +14,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.12-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -27,7 +27,7 @@ services:
       dockerfile: services/gateway/Dockerfile
     command: ["python", "-m", "libs.orcas_common.migrate"]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:-orcas_demo_only}@postgres:5432/${POSTGRES_DB:-orcas}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,8 +52,8 @@ services:
       ORCAS_CHROMA_DIR: /data/chroma
       ORCAS_INDEX_INFO: /data/index_info.json
       EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      REDIS_URL: redis://redis:6379/0
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - index_data:/data
@@ -90,12 +90,25 @@ services:
     environment:
       ORCAS_STUB_MODE: ${ORCAS_STUB_MODE:-true}
       STUB_SERVICE_URL: http://llm-stub:8003
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_BASE: ${LLM_API_BASE:-}
       LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      LLM_FALLBACK_API_BASE: ${LLM_FALLBACK_API_BASE:-}
+      LLM_FALLBACK_API_KEY: ${LLM_FALLBACK_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      LLM_TOTAL_BUDGET_SECONDS: ${LLM_TOTAL_BUDGET_SECONDS:-90}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.0}
+      BREAKER_FAILURES: ${BREAKER_FAILURES:-3}
+      BREAKER_COOLDOWN_S: ${BREAKER_COOLDOWN_S:-30}
+      LLM_PRICE_INPUT_PER_M: ${LLM_PRICE_INPUT_PER_M:-0}
+      LLM_PRICE_OUTPUT_PER_M: ${LLM_PRICE_OUTPUT_PER_M:-0}
+      LLM_FALLBACK_PRICE_INPUT_PER_M: ${LLM_FALLBACK_PRICE_INPUT_PER_M:-0}
+      LLM_FALLBACK_PRICE_OUTPUT_PER_M: ${LLM_FALLBACK_PRICE_OUTPUT_PER_M:-0}
+      LLM_FORCE_FAIL: ${LLM_FORCE_FAIL:-0}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       llm-stub:
@@ -113,15 +126,27 @@ services:
       context: .
       dockerfile: services/worker/Dockerfile
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:-orcas_demo_only}@postgres:5432/${POSTGRES_DB:-orcas}
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      RETRIEVAL_SERVICE_URL: http://retrieval:8001
-      LLM_GATEWAY_URL: http://llm-gateway:8002
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      RETRIEVAL_SERVICE_URL: ${RETRIEVAL_SERVICE_URL:-http://retrieval:8001}
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway:8002}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
+      MAX_STEPS: ${MAX_STEPS:-10}
+      MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-8}
+      RUN_WALL_CLOCK_S: ${RUN_WALL_CLOCK_S:-45}
+      MAX_VERIFY_RETRIES: ${MAX_VERIFY_RETRIES:-2}
+      PROMPT_RESEARCHER_CLASSIFY: ${PROMPT_RESEARCHER_CLASSIFY:-v1}
+      PROMPT_RESEARCHER_REFLECT: ${PROMPT_RESEARCHER_REFLECT:-v2}
+      PROMPT_RESEARCHER_DRAFT: ${PROMPT_RESEARCHER_DRAFT:-v1}
+      PROMPT_VERIFIER: ${PROMPT_VERIFIER:-v1}
+      ORCAS_INJECT_BAD_DRAFT: ${ORCAS_INJECT_BAD_DRAFT:-0}
+      CELERY_SOFT_TIME_LIMIT: ${CELERY_SOFT_TIME_LIMIT:-120}
+      CELERY_TIME_LIMIT: ${CELERY_TIME_LIMIT:-180}
+      RETRIEVAL_TIMEOUT_S: ${RETRIEVAL_TIMEOUT_S:-10}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -138,22 +163,38 @@ services:
       start_period: 30s
       retries: 5
 
+  worker-scheduler:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    command: ["celery", "-A", "services.worker.tasks:celery_app", "beat", "--loglevel=info"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      CELERY_TIME_LIMIT: ${CELERY_TIME_LIMIT:-180}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
   gateway:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:-orcas_demo_only}@postgres:5432/${POSTGRES_DB:-orcas}
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       ORCAS_ADMIN_TOKEN: ${ORCAS_ADMIN_TOKEN:-}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
       RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
-      RETRIEVAL_SERVICE_URL: http://retrieval:8001
+      RETRIEVAL_SERVICE_URL: ${RETRIEVAL_SERVICE_URL:-http://retrieval:8001}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     ports:
       - "8000:8000"
     depends_on:
@@ -244,6 +285,7 @@ services:
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [resources]
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -260,8 +302,8 @@ services:
       context: .
       dockerfile: services/metrics_exporter/Dockerfile
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:-orcas_demo_only}@postgres:5432/${POSTGRES_DB:-orcas}
-      REDIS_URL: redis://redis:6379/1
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
+      REDIS_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -273,6 +315,28 @@ services:
       timeout: 5s
       retries: 5
 
+  live-scorer:
+    build:
+      context: .
+      dockerfile: services/retrieval/Dockerfile
+    command: ["python", "-m", "eval.live_scorer", "--loop", "60"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
+      LIVE_SCORE_SAMPLE_RATE: ${LIVE_SCORE_SAMPLE_RATE:-0.2}
+      HF_HOME: /opt/models
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  ollama:
+    image: ollama/ollama:0.5.13
+    profiles: [ollama]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
 volumes:
   postgres_data:
   index_data:
+  ollama_data:

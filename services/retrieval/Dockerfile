@@ -4,7 +4,7 @@
 # The embedding model is baked in at build time, so the container never downloads
 # it at runtime (L1 / startup latency). The Chroma index is NOT baked in — it is
 # read from the /data volume that the ingest one-shot writes.
-FROM python:3.11-slim
+FROM python:3.11.18-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

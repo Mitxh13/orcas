@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcas.pesu.edu/contracts/feedback.v1.schema.json",
+  "title": "OrcasFeedback",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/response"}
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["rating"],
+      "properties": {
+        "rating": {"enum": ["up", "down"]},
+        "reason": {"type": "string", "maxLength": 500}
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": ["feedback_id", "run_id", "rating", "reason", "created_at"],
+      "properties": {
+        "feedback_id": {"type": "string", "format": "uuid"},
+        "run_id": {"type": "string", "format": "uuid"},
+        "rating": {"enum": ["up", "down"]},
+        "reason": {"type": "string", "maxLength": 500},
+        "created_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

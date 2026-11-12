@@ -42,3 +42,61 @@ time, affected service, symptom, detection, cause, recovery, and follow-up.
 - **Follow-up:** keep the recovery drill in CI and treat a failed probe as
   test evidence until the service state is checked, rather than assuming the
   application failed to recover.
+
+## 2026-11-03 UTC — Stub routing skewed the measured workload
+
+- **Affected component:** LLM stub and the earlier Locust benchmark.
+- **Symptom and detection:** the ten-client phase recorded 101 completed and
+  263 escalated runs; the audit found many escalations after one LLM call.
+- **Cause:** the stub's narrow parsing and classification did not represent
+  the intended multi-step agent workload.
+- **Recovery:** commit `3a64fc6` hardened parsing and added a multi-entity
+  classifier. The earlier latency table remains historical evidence.
+- **Follow-up:** the
+  [repeat benchmark](https://github.com/Mitxh13/orcas/actions/runs/43057185087)
+  used the same payload mix and stub delay. The ten-client database window
+  changed from 101 completed / 263 escalated to 245 completed / 136
+  escalated; p95 changed from 40 to 30 seconds. LLM calls per terminal run
+  remained near three, so inspect the reference-case trace before claiming
+  its full reasoning depth from the aggregate benchmark.
+
+## 2026-11-03 UTC — Bank case cited a non-maintainability clause
+
+- **Affected component:** stub citation selection and agent evidence handling.
+- **Symptom and detection:** the audit found that the §4.1 bank case cited RBI
+  clause 10 as its routing basis, although that clause covers non-maintainability.
+- **Cause:** clause 10 ranked ahead of the decisive grounds clause in the
+  retrieved context, and the stub selected it.
+- **Recovery:** commit `3a64fc6` excluded non-maintainability headings from
+  RBI citation selection; `50dfb54` added verifier ledger checks and `0143493`
+  aligned stub citations with an empty evidence ledger.
+- **Follow-up:** keep the reference-case citation test in CI and inspect its
+  live trace during the demo rehearsal.
+
+## 2026-11-03 UTC — LLM failure could silently use a heuristic answer
+
+- **Affected component:** LLM gateway and worker client.
+- **Symptom and detection:** the integration audit found a fallback path that
+  could return an unverified heuristic answer when the provider failed.
+- **Cause:** provider failure was not represented as a typed unavailable state
+  throughout the call chain.
+- **Recovery:** commit `8a0b62c` added fail-closed gateway behavior and typed
+  `LLMUnavailable` handling.
+- **Follow-up:** demonstrate provider failure with `kill_provider.sh` and
+  confirm an escalated, degraded determination.
+
+## 2026-11-11 UTC — Retrieval outage drill ended before stale-run recovery
+
+- **Affected component:** CI recovery drill on the stub-backed Compose stack.
+- **Symptom and detection:** the first
+  [run](https://github.com/Mitxh13/orcas/actions/runs/43057185087) timed out
+  while polling a retrieval-outage run after 150 seconds; the earlier worker
+  and Redis cases passed.
+- **Cause:** the drill's 150-second wait ended before the configured
+  180-second worker hard limit plus 60-second stale-run margin.
+- **Recovery:** commit `e513503` waits through that recovery window and
+  requires an `agent_failure`, degraded escalation. The
+  [repeat run](https://github.com/Mitxh13/orcas/actions/runs/43060243324)
+  passed all four cases, including a completed new run after retrieval restart.
+- **Follow-up:** retain the longer timeout and inspect the persisted run
+  status and reason in future recovery checks.
