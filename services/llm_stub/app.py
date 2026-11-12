@@ -43,6 +43,21 @@ STUB_DELAY_MS = int(os.getenv("STUB_DELAY_MS", "1500"))
 # ---------------------------------------------------------------------------
 
 
+_DECIDING_CLAUSES = {"RBI": ("preamble", "9")}
+
+
+def _clause_of(item: dict) -> str:
+    return str(item.get("clause_id") or item.get("clause") or "")
+
+
+def _is_non_maintainability(item: dict) -> bool:
+    heading = item.get("heading_path") or ""
+    heading = " ".join(heading) if isinstance(heading, list) else str(heading)
+    opening = f"{heading} {item.get('text', '')[:160]}".lower()
+    return "non-maintainab" in opening or "non maintainab" in opening or (
+        item.get("framework") == "RBI" and _clause_of(item) == "10")
+
+
 def citation_from_evidence(prompt: str, framework: str) -> dict | None:
     """Pick an exact quote from retrieved evidence in the draft prompt."""
     match = re.search(r"Evidence Ledger:\s*(\[[^\r\n]*\])", prompt)
@@ -56,11 +71,18 @@ def citation_from_evidence(prompt: str, framework: str) -> dict | None:
                   and item.get("chunk_type", "clause") != "scope_card" and item.get("text")]
     if not candidates:
         return None
-    keywords = ("deficiency in service", "regulated by reserve bank") if framework == "RBI" else (
+    keywords = ("regulated by reserve bank", "deficiency in service") if framework == "RBI" else (
         "investor grievances", "registered intermediaries", "mutual fund"
     )
-    selected = next((item for word in keywords for item in candidates
-                     if word in item["text"].lower()), candidates[0])
+    # The clauses that decide jurisdiction come first; a clause listing grounds on which a
+    # complaint is NOT maintainable is cited only when nothing else was retrieved.
+    deciding = _DECIDING_CLAUSES.get(framework, ())
+    usable = [item for item in candidates if not _is_non_maintainability(item)] or candidates
+    selected = next(
+        (item for clause in deciding for item in usable if _clause_of(item) == clause),
+        next((item for word in keywords for item in usable if word in item["text"].lower()),
+             usable[0]),
+    )
     passage = selected["text"]
     phrase = next((word for word in keywords if word in passage.lower()), "")
     start = max(0, passage.lower().find(phrase) - 30) if phrase else 0
@@ -70,7 +92,7 @@ def citation_from_evidence(prompt: str, framework: str) -> dict | None:
         "doc_id": selected.get("doc_id", ""),
         "doc_title": selected.get("doc_title", ""),
         "circular_ref": selected.get("circular_ref", ""),
-        "clause": selected.get("clause_id", ""),
+        "clause": _clause_of(selected),
         "chunk_id": selected["chunk_id"],
         "quote_span": quote_span,
     }
@@ -143,7 +165,8 @@ _OOC = {"insurance", "insurer", "hospital", "pension", "nps"}
 
 
 def _has(text: str, terms: set) -> bool:
-    return any(t in text for t in terms)
+    """Whole-word match (plural allowed), so "rta" does not fire on "important"."""
+    return any(re.search(rf"\b{re.escape(t)}(?:s|es)?\b", text) for t in terms)
 
 
 def _extract_complaint_text(combined: str) -> str:
