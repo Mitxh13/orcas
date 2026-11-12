@@ -22,7 +22,9 @@ COPY services/ingest/requirements.txt /app/requirements.txt
 RUN pip install -r requirements.txt
 
 # Same baked model as the retrieval image (consistent embeddings, no runtime download).
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ARG EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+ENV EMBED_MODEL=${EMBED_MODEL}
+RUN python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['EMBED_MODEL'])"
 
 COPY services/ ./services/
 COPY corpus/ ./corpus/
