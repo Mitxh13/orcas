@@ -230,34 +230,206 @@ def test_researcher_out_of_corpus_escalation(researcher_graph, verifier_graph):
     assert result["escalation"]["reason_code"] in ("out_of_corpus", "low_confidence", "unverified", "agent_failure")
 
 
-def test_verifier_catches_unsupported_citation(researcher_graph, verifier_graph):
+BROKER_COMPLAINT = {
+    "client_id": "test-client",
+    "is_synthetic": True,
+    "channel": "web",
+    "date_of_event": "2026-08-01",
+    "date_filed": "2026-09-01",
+    "text": "My stock broker refused to execute my trade.",
+}
+
+
+def _observed_graphs(llm, fake_retrieval, store, run_id):
+    from services.worker.clients.observed_retrieval import ObservedRetrievalClient
+
+    retrieval = ObservedRetrievalClient(fake_retrieval, store, run_id)
+    return (ResearcherGraph(llm_client=llm, retrieval_client=retrieval),
+            VerifierGraph(llm_client=llm, retrieval_client=retrieval))
+
+
+def _searches(store, run_id):
+    return [event["payload"] for event in store.get_events(run_id)
+            if event["kind"] == "tool_call" and event["payload"].get("tool") == "search_corpus"]
+
+
+def test_rejected_draft_goes_back_to_the_researcher_and_is_redrafted(fake_llm, fake_retrieval):
     """
-    Demo #6: Planted bad citation causes Verifier to catch the discrepancy
-    and escalate.
+    Demo #6: the verifier rejects a planted citation, the researcher searches again with a
+    retry strategy and re-drafts, and the fabricated citation never reaches the result.
     """
+    store = InMemoryRunStore()
     run_id = str(uuid.uuid4())
-    complaint = {
-        "client_id": "test-client",
-        "is_synthetic": True,
-        "channel": "web",
-        "date_of_event": "2026-08-01",
-        "date_filed": "2026-09-01",
-        "text": "My stock broker refused to execute my trade.",
-    }
+    researcher, verifier = _observed_graphs(fake_llm, fake_retrieval, store, run_id)
 
     result = run_complaint_pipeline(
-        run_id=run_id,
-        complaint_data=complaint,
-        researcher_graph=researcher_graph,
-        verifier_graph=verifier_graph,
-        inject_bad_draft=True,
+        run_id=run_id, complaint_data=BROKER_COMPLAINT, run_store=store,
+        researcher_graph=researcher, verifier_graph=verifier, inject_bad_draft=True,
+    )
+
+    jsonschema.validate(instance=result, schema=DETERMINATION_SCHEMA)
+    events = store.get_events(run_id)
+    kinds = [event["kind"] for event in events]
+    retry = next(event["payload"] for event in events if event["kind"] == "retry")
+    assert retry["strategy"] in ("query_rewrite", "framework_swap", "clause_follow")
+    assert "not retrieved" in retry["reason"]
+    assert kinds.count("draft") == 2, "the researcher wrote a second draft"
+    searches = _searches(store, run_id)
+    assert len(searches) >= 2 and searches[-1]["query"] != searches[0]["query"]
+    assert kinds.index("retry") > kinds.index("draft")
+
+    assert all(c["chunk_id"] != "non_existent_chunk_hash_123456" for c in result["citations"])
+    assert result["status"] == "completed"
+    assert result["verification"] == {**result["verification"], "passed": True, "attempts": 2}
+    assert not any(key.startswith("_") for key in result)
+
+
+def test_draft_that_stays_unsupported_after_the_retry_is_escalated(fake_retrieval):
+    """A model that keeps citing a passage it never retrieved is not accepted on retry."""
+    llm = FakeLLMClient(overrides={"draft": {
+        "route": "assign_to_entity", "regulator": "SEBI", "entity_type": "broker",
+        "timeline": None, "basis": "Falls under SEBI SCORES [c1].",
+        "citations": [{
+            "citation_id": "c1", "doc_id": "sebi_scores_master_circular", "doc_title": "SCORES",
+            "circular_ref": "X", "clause": "2", "chunk_id": "never_retrieved_chunk",
+            "quote_span": "this passage was never retrieved in the run at all",
+        }],
+    }})
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+    researcher, verifier = _observed_graphs(llm, fake_retrieval, store, run_id)
+
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=BROKER_COMPLAINT, run_store=store,
+        researcher_graph=researcher, verifier_graph=verifier,
     )
 
     jsonschema.validate(instance=result, schema=DETERMINATION_SCHEMA)
     assert result["status"] == "escalated"
     assert result["route"] == "escalate_to_human"
     assert result["verification"]["passed"] is False
-    assert result["escalation"]["reason_code"] in ("unverified", "guardrail")
+    assert result["verification"]["attempts"] == 2
+    assert result["escalation"]["reason_code"] == "unverified"
+    assert [event["kind"] for event in store.get_events(run_id)].count("retry") == 1
+
+
+def _retry_state(graph, ledger, queries=("broker grievance redressal",), framework="SEBI"):
+    draft = {
+        "regulator": framework, "citations": [], "_evidence_ledger": list(ledger),
+        "_research_state": {"classification": {"product": "equity_broking"},
+                            "queries_tried": list(queries), "current_framework": framework,
+                            "budget": None, "strategies_used": []},
+    }
+    state = {"normalized_text": "My stock broker refused to execute my trade.",
+             "classification": {"product": "equity_broking"}, "evidence_ledger": list(ledger),
+             "queries_tried": list(queries), "current_framework": framework}
+    return state, draft
+
+
+def test_retry_strategies_rotate_and_are_never_repeated(researcher_graph):
+    ledger = [{"chunk_id": "a", "doc_id": "doc", "clause_id": "2", "framework": "SEBI",
+               "heading_path": ["Redressal"], "text": "handled as set out in clause 7 below"}]
+    state, draft = _retry_state(researcher_graph, ledger)
+
+    first, call = researcher_graph._retry_tool_call(state, draft, "framework_swap", [])
+    assert first == "framework_swap" and call["args"]["framework"] == "RBI"
+
+    second, call = researcher_graph._retry_tool_call(state, draft, "framework_swap", [first])
+    assert second == "query_rewrite"
+    assert call["args"]["query"] not in state["queries_tried"]
+    assert call["args"]["query"].startswith("Redressal")
+
+    third, call = researcher_graph._retry_tool_call(state, draft, None, [first, second])
+    assert third == "clause_follow"
+    assert call == {"tool_name": "get_clause", "args": {"doc_id": "doc", "clause_id": "7"}}
+
+
+def test_retry_strategy_that_cannot_act_falls_through_to_the_next(researcher_graph):
+    """Both frameworks already searched: a suggested framework swap has nothing new to fetch."""
+    ledger = [{"chunk_id": "a", "doc_id": "d1", "framework": "SEBI", "text": "no reference"},
+              {"chunk_id": "b", "doc_id": "d2", "framework": "RBI", "text": "no reference"}]
+    state, draft = _retry_state(researcher_graph, ledger)
+
+    strategy, call = researcher_graph._retry_tool_call(state, draft, "framework_swap", [])
+
+    assert strategy == "query_rewrite" and call["tool_name"] == "search_corpus"
+
+
+def test_clause_lookup_result_enters_the_ledger_as_chunk_passages(fake_llm):
+    """The retrieval service returns a clause with chunk ids; the ledger needs the chunks."""
+    class ClauseRetrieval(FakeRetrievalClient):
+        def get_clause(self, doc_id, clause_id):
+            return {"doc_id": doc_id, "clause_id": clause_id, "text": "whole clause",
+                    "chunk_ids": ["d2d66258e59fc24f14530d30125912f54bd3c045f20e9a915253e947e682323e",
+                                  "missing"]}
+
+    graph = ResearcherGraph(llm_client=fake_llm,
+                            retrieval_client=ClauseRetrieval(fixtures_path=FIXTURES_PATH))
+    budget = {"steps": 1, "max_steps": 10, "tool_calls": 0, "max_tool_calls": 8,
+              "started_at": __import__("time").time(), "max_wall_clock_s": 45.0}
+
+    update = graph.node_tool({
+        "budget": budget, "evidence_ledger": [], "queries_tried": [], "complaint_fields": {},
+        "pending_tool_call": {"tool_name": "get_clause",
+                              "args": {"doc_id": "sebi_scores_master_circular", "clause_id": "2"}},
+    })
+
+    assert [p["chunk_id"] for p in update["evidence_ledger"]] == [
+        "d2d66258e59fc24f14530d30125912f54bd3c045f20e9a915253e947e682323e"]
+    assert update["last_search_new_chunks"] == 1
+
+
+def test_search_that_adds_nothing_new_ends_the_research_loop(researcher_graph):
+    state = {"reflection": {"requires_further_search": True},
+             "budget": {"tool_calls": 1, "max_tool_calls": 8}}
+    assert researcher_graph._route_after_reflect({**state, "last_search_new_chunks": 0}) == "draft"
+    assert researcher_graph._route_after_reflect({**state, "last_search_new_chunks": 2}) == "plan"
+
+
+def test_verifier_prompt_shows_every_cited_passage_and_no_internal_state(
+        fake_retrieval, monkeypatch):
+    seen = {}
+
+    class RecordingLLM(FakeLLMClient):
+        def chat(self, messages, **kwargs):
+            seen["prompt"] = messages[0]["content"]
+            return super().chat(messages, **kwargs)
+
+    chunk_id = "d2d66258e59fc24f14530d30125912f54bd3c045f20e9a915253e947e682323e"
+    chunk = fake_retrieval.get_chunk(chunk_id)
+    filler = [{"chunk_id": f"filler{i}", "framework": "SEBI", "text": "x"} for i in range(6)]
+    draft = {
+        "status": "completed", "route": "assign_to_entity", "regulator": "SEBI",
+        "basis": "Falls under SCORES [c1].", "timeline": None, "degraded": False,
+        "citations": [{"citation_id": "c1", "chunk_id": chunk_id,
+                       "quote_span": chunk["text"][:60]}],
+        "_evidence_ledger": [], "_research_state": {"budget": {"started_at": 1.0}},
+    }
+
+    result = VerifierGraph(llm_client=RecordingLLM(), retrieval_client=fake_retrieval).verify(
+        draft=draft, evidence_ledger=filler + [chunk])
+
+    assert chunk["text"][:60] in seen["prompt"].split("Retrieved Passages:")[1]
+    assert "_research_state" not in seen["prompt"] and "started_at" not in seen["prompt"]
+    assert result["draft"]["prompt_versions"]["verifier"] == "v1"
+
+
+def test_degraded_verifier_reply_marks_the_determination_degraded(fake_retrieval):
+    class DegradedLLM(FakeLLMClient):
+        def chat(self, messages, **kwargs):
+            return {**super().chat(messages, **kwargs), "degraded": True}
+
+    chunk_id = "d2d66258e59fc24f14530d30125912f54bd3c045f20e9a915253e947e682323e"
+    chunk = fake_retrieval.get_chunk(chunk_id)
+    draft = {"status": "completed", "route": "assign_to_entity", "regulator": "SEBI",
+             "basis": "Falls under SCORES [c1].", "timeline": None, "degraded": False,
+             "citations": [{"citation_id": "c1", "chunk_id": chunk_id,
+                            "quote_span": chunk["text"][:60]}]}
+
+    result = VerifierGraph(llm_client=DegradedLLM(), retrieval_client=fake_retrieval).verify(
+        draft=draft, evidence_ledger=[chunk])
+
+    assert result["decision"] == "accept" and result["draft"]["degraded"] is True
 
 
 # ---------------------------------------------------------------------------

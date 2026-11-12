@@ -339,15 +339,43 @@ def run_complaint_pipeline(
             max_retries=max_attempts,
         )
 
+        # A rejected draft goes back to the researcher, which searches again with a strategy
+        # it has not used in this run and writes a new draft from the larger ledger (M6).
         while v_res.get("decision") == "retry" and attempt < max_attempts:
             attempt += 1
+            phase = "research"
+            draft = r_graph.retry(
+                run_id=run_id,
+                complaint_fields=complaint_payload,
+                prior_draft=draft,
+                suggested_strategy=v_res.get("suggested_strategy"),
+                reason=v_res.get("reason", ""),
+            )
+            if not draft:
+                raise RuntimeError("researcher returned no draft on retry")
+            strategy = (draft.get("_research_state", {}).get("strategies_used") or [None])[-1]
+            partial_findings = draft.get("citations", [])
             store.append_event(
                 run_id=run_id,
                 agent="verifier",
                 step="retry",
                 kind="retry",
-                payload={"attempt": attempt, "strategy": v_res.get("suggested_strategy")},
+                payload={"attempt": attempt, "strategy": strategy, "reason": v_res.get("reason")},
             )
+            store.append_event(
+                run_id=run_id,
+                agent="researcher",
+                step="draft",
+                kind="draft",
+                payload={
+                    "route": draft.get("route"),
+                    "basis": draft.get("basis"),
+                    "degraded": draft.get("degraded", False),
+                    "attempt": attempt,
+                },
+            )
+            phase = "verify"
+            evidence_ledger = draft.get("_evidence_ledger", draft.get("citations", []))
             v_res = v_graph.verify(
                 draft=draft,
                 evidence_ledger=evidence_ledger,

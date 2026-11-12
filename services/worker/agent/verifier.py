@@ -179,8 +179,9 @@ class VerifierGraph:
         prompt = prompt_loader.render(
             "verifier",
             _V_VERIFIER,
-            draft_determination=json.dumps(draft),
-            retrieved_passages=json.dumps(evidence_ledger[:5]),
+            draft_determination=json.dumps(
+                {k: v for k, v in draft.items() if not k.startswith("_")}),
+            retrieved_passages=json.dumps(self._passages_for_prompt(citations, evidence_ledger)),
         )
 
         response = self.llm.chat(
@@ -276,7 +277,9 @@ class VerifierGraph:
             "attempts": attempt,
             "strategy": ver_json.get("suggested_strategy"),
         }
-        verified_draft.setdefault("prompt_versions", {})[f"verifier_{_V_VERIFIER}"] = "verifier"
+        verified_draft["prompt_versions"] = {
+            **verified_draft.get("prompt_versions", {}), "verifier": _V_VERIFIER}
+        verified_draft["degraded"] = bool(draft.get("degraded") or response.get("degraded"))
 
         return {
             "decision": "accept",
@@ -287,6 +290,15 @@ class VerifierGraph:
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _passages_for_prompt(citations: List[Dict[str, Any]],
+                             evidence_ledger: List[Dict[str, Any]], limit: int = 5):
+        """Every cited passage first, then other evidence up to ``limit`` in total."""
+        cited_ids = {c.get("chunk_id") for c in citations}
+        cited = [p for p in evidence_ledger if p.get("chunk_id") in cited_ids]
+        others = [p for p in evidence_ledger if p.get("chunk_id") not in cited_ids]
+        return cited + others[:max(0, limit - len(cited))]
 
     def _retry_or_escalate(
         self,
@@ -327,7 +339,8 @@ class VerifierGraph:
             "claims_supported": 0,
             "attempts": attempt,
         }
-        esc_draft.setdefault("prompt_versions", {})[f"verifier_{_V_VERIFIER}"] = "verifier"
+        esc_draft["prompt_versions"] = {
+            **esc_draft.get("prompt_versions", {}), "verifier": _V_VERIFIER}
         return {
             "decision": "escalate",
             "passed": False,
