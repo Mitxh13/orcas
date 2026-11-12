@@ -24,7 +24,8 @@ At ten concurrent clients, p95 end-to-end latency should be **at most 90
 seconds**, and at least **99%** of accepted runs should reach `completed` or
 `escalated`. This allows for queued multi-step analysis while keeping a
 reviewer-facing workflow under roughly a minute and a half for most requests.
-The worker has a 90-second per-task limit; queue time is included in the SLO.
+The worker has a 120-second soft and 180-second hard per-task limit
+(`CELERY_SOFT_TIME_LIMIT`, `CELERY_TIME_LIMIT`); queue time is included in the SLO.
 
 Find the first higher concurrency where either target fails. Repeat the same
 payload mix and stub delay with `docker compose up --scale worker=3`. Compare

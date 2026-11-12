@@ -83,6 +83,7 @@ On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The 
 | Web client | http://localhost:8080 |
 | Gateway API docs (OpenAPI) | http://localhost:8000/docs |
 | Retrieval API | http://localhost:8001/docs |
+| LLM gateway health (host-only port) | http://localhost:8002/health |
 | Prometheus | http://localhost:9090 |
 | Grafana | http://localhost:3000 |
 | Jaeger | http://localhost:16686 |

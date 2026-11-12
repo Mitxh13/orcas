@@ -81,38 +81,45 @@ Supporting-passage metrics are computed over the 15 scenarios that pin a passage
 - **Supporting passage cited** = share where a cited chunk is the pinned clause's chunk (not
   applicable to the baseline, which does not cite).
 
-## 5. Results (2026-11-03)
+## 5. Results (2026-11-12)
+
+Re-recorded after the November agent changes (stub and agent rewrite, verifier retry, intake
+guardrail patterns) on index `minilm-l6-v2.clause.637.dd539860ac65`, prompts classify v3, reflect v2,
+draft v1, verifier v1. The 2026-11-03 figures described a pipeline that no longer ships.
 
 ### 5.1 The agent, stub mode — `eval/results/agent-stub.json`
 
 | Metric | All (25) | Held-out (7) |
 |---|---|---|
-| answered (non-escalated) | 6 | 2 |
+| answered (non-escalated) | 18 | 4 |
 | groundedness | 1.000 | 1.000 |
-| context_relevance | 0.400 | 0.400 |
+| context_relevance | 0.561 | 0.450 |
 | faithfulness | 1.000 | 1.000 |
 | hallucination_rate | 0.000 | 0.000 |
-| route_accuracy | 0.440 | 0.571 |
-| regulator_accuracy | 0.240 | 0.143 |
-| entity_accuracy | 0.240 | 0.286 |
-| escalation_precision / recall | 0.421 / 0.800 | 0.600 / 1.000 |
-| supporting passage retrieved | 0.133 | 0.250 |
-| supporting passage cited | 0.133 | 0.250 |
-| intake rejection recall | 0.400 | 0.500 |
+| route_accuracy | 0.720 | 0.429 |
+| regulator_accuracy | 0.720 | 0.429 |
+| entity_accuracy | 0.680 | 0.429 |
+| escalation_precision / recall | 0.714 / 0.500 | 0.333 / 0.333 |
+| supporting passage retrieved | 0.133 | 0.000 |
+| supporting passage cited | 0.000 | 0.000 |
+| intake rejection recall | 1.000 | 1.000 |
 | intake false rejections | 0 | 0 |
 
-Reading: 19 of 25 runs escalated (11 `out_of_corpus`, 8 `unverified`), mostly because the stub's
-keyword classifier and draft step misroute (tracked in Mitesh's M4). The 1.0 groundedness covers
-only 6 answers whose single generic sentence the embedding judge accepts — it is not a quality
-signal. The supporting-passage metrics show what the judge misses: only the two mutual-fund runs
-retrieved and cited their pinned passage. For §4.1 the agent's query ranks RBI clause 10 ("Grounds
-for non-maintainability") first and the deciding clause 9 seventh, so the agent's `k=5` never sees
-clause 9 and it cites clause 10. The gateway guardrail catches 2 of the 5 injections; the three
-paraphrases get past it (Jignas's J10), and one of them (a JSON field injection) is answered by the
-agent (Mitesh's M11).
+Reading: 18 runs completed and 7 escalated (5 `out_of_corpus`, 2 `split_regulators`); none escalated
+as `unverified`, against 8 on 2026-11-03. The 1.0 groundedness still covers single generic sentences
+that the embedding judge accepts, so it is not a quality signal. The supporting-passage metrics show
+what the judge misses: the agent retrieves the pinned passage in 2 of 15 scenarios and cites it in
+none. For §4.1 the agent now routes to RBI and cites the scheme's preamble, one of the two deciding
+passages; the scenario pins clause 9, which the agent's `k=5` search still does not return, so the run
+counts as a miss on this metric. The stub draft cites one passage chosen by keyword, which is why
+this metric cannot improve in stub mode. The gateway guardrail rejects all 5 injection scenarios
+(2 of 5 on 2026-11-03). The 7 route mispredictions are those 5 injections, whose label expects a
+rejection and not a route, plus `ref_4_1_paraphrase_1` and `broker_nonpayment`.
 
-**Live-model results:** pending a reachable model (Mitesh's M2, Jignas's J3); `make eval-live`
-produces them.
+Held-out numbers rest on 7 scenarios: one scenario moves a rate by 0.14.
+
+**Live-model results:** none yet. `LLM_GATEWAY_URL=http://localhost:8002 make eval-live` produces
+them once the stack runs with `ORCAS_STUB_MODE=false`.
 
 ### 5.2 Keyword baseline (reference only) — `eval/results/baseline.json`
 
@@ -144,8 +151,8 @@ faithfulness 0.800 on that 22-scenario set. Recorded in `notes_tahir.md` under "
 - **25 scenarios give wide confidence intervals** — treat deltas smaller than a few points as noise.
 - TruLens: `python -m eval.trulens_eval` scores the same agent runs through TruLens primitives (a
   custom embedding feedback **Provider**, `Feedback` objects, a persisted `TruSession`). Its feedback
-  values are raw cosine similarities (stub mode: groundedness 0.414, context relevance 0.257 over the 6
-  answered runs), not the thresholded claim decisions, so they are not comparable with the table above.
+  values are raw cosine similarities (stub mode, 2026-11-12: groundedness 0.561, context relevance
+  0.347 over the answered runs), not the thresholded claim decisions, so they are not comparable with the table above.
   The claim-level metrics in `metrics.py` remain primary.
 
 ## 7. Experiments, cache, live scoring (Slice 6)
@@ -170,10 +177,11 @@ scenarios and model, each in a fresh process with its environment overrides, and
 LLM call counts and a verdict on the primary metric (deltas of one or two scenarios are flagged as
 within noise). `compare <name> before.json after.json` does the same for two existing results files.
 
-**Status:** both need a live model (stub replies do not depend on prompt wording; the harness refuses
-stub mode unless `--allow-stub`) and Mitesh's prompt-version switch (M13; L3 also needs M3's draft v2).
-A stub-mode plumbing run gave identical results and the harness warned that the override had no
-effect, as expected before M13.
+**Status:** both need only a live model now (stub replies do not depend on prompt wording; the
+harness refuses stub mode unless `--allow-stub`). The prompt-version switch is merged, and draft v2
+is wired: the model cites numbered evidence and the worker fills in the chunk. In stub mode, draft
+v1 and v2 give identical outcomes on all 25 scenarios, which confirms the plumbing and nothing
+about model quality.
 
 **Budget:** one configuration is 25 scenarios × roughly 4–11 LLM calls, so one experiment is about
 200–550 calls. Check the hosted free tier's daily quota first; if it does not fit, run against an
@@ -210,4 +218,4 @@ retrieved passages skipped), a second pass scored nothing, and the exporter publ
 The earlier in-memory demo, with synthetic feedback, is removed.
 
 ## 8. Next
-T3: run the two pre-registered experiments once M13 and a live model are available. Live-model results once a model is reachable.
+T3: run the two pre-registered experiments against a live model, then record `make eval-live`.

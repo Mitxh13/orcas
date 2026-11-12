@@ -206,10 +206,10 @@ Feedback endpoint (J), aggregation, live scorer samples N% of completed runs (T)
 ## 8. Platform
 
 ### 8.1 Services
-`gateway, worker, retrieval, llm-gateway, llm-stub, ingest, web, redis, postgres, prometheus, grafana, otel-collector, jaeger, cadvisor` (14 containers; ≥4 required). Boundary justification in `ARCHITECTURE.md §2.1`.
+`gateway, worker, worker-scheduler, worker-metrics, live-scorer, retrieval, llm-gateway, llm-stub, web, redis, postgres, prometheus, grafana, otel-collector, jaeger` run continuously (15 containers; ≥4 required). `migrate` and `ingest` are one-shot jobs; `cadvisor` and `ollama` start only with their Compose profiles. Boundary justification in `ARCHITECTURE.md §2.1`.
 
 ### 8.2 Configuration (D4)
-All config via env. Documented variables (in `.env.example`, no values for secrets): `LLM_PROVIDER, LLM_MODEL, LLM_API_KEY, LLM_FALLBACK_MODEL, EMBED_MODEL, POSTGRES_*, REDIS_URL, MAX_STEPS, MAX_TOOL_CALLS, RUN_WALL_CLOCK_S, MAX_VERIFY_RETRIES, RATE_LIMIT_PER_MIN, RUN_CACHE_TTL_S, BREAKER_FAILURES, BREAKER_COOLDOWN_S, LIVE_SCORE_SAMPLE_RATE, OTEL_EXPORTER_OTLP_ENDPOINT`. CI scans tracked files for key formats and code, prompt, and Compose files for provider/model identifiers. The local embedding model is the documented exception.
+All config via env. Documented variables (in `.env.example`, no values for secrets): `LLM_MODEL, LLM_API_KEY, LLM_FALLBACK_MODEL, EMBED_MODEL, POSTGRES_*, REDIS_URL, MAX_STEPS, MAX_TOOL_CALLS, RUN_WALL_CLOCK_S, MAX_VERIFY_RETRIES, RATE_LIMIT_PER_MIN, RUN_CACHE_TTL_S, BREAKER_FAILURES, BREAKER_COOLDOWN_S, LIVE_SCORE_SAMPLE_RATE, OTEL_EXPORTER_OTLP_ENDPOINT`. CI scans tracked files for key formats and code, prompt, and Compose files for provider/model identifiers. The local embedding model is the documented exception.
 
 ### 8.3 Caching (D7)
 | Cache | Key | Justification |
@@ -219,7 +219,7 @@ All config via env. Documented variables (in `.env.example`, no values for secre
 Report: hit ratio; p95 and cost-per-run before/after.
 
 ### 8.4 Rate limiting (D7)
-Per-client token bucket in Redis. Rationale: cost control against a looping client.
+Token buckets in Redis: one per source IP (`RATE_LIMIT_IP_PER_MIN`, default 600), one per source IP for invalid input and one per source IP and `client_id` (`RATE_LIMIT_PER_MIN`, default 60). Rationale: cost control against a looping client, without one host-side client starving the others behind Compose.
 
 ## 9. Reliability
 
