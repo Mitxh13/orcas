@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+import httpx
 from opentelemetry import propagate, trace
 
 from libs.orcas_common.config import celery_broker_url, celery_result_backend
@@ -145,6 +146,50 @@ def _build_degraded_escalation(
     return _strip_internal(base)
 
 
+def _failure_reason(exc: Exception, phase: str) -> str:
+    """Short, user-facing reason for an unexpected failure; the detail goes in the event."""
+    if type(exc).__name__ == "SoftTimeLimitExceeded":
+        return f"The worker time limit was reached during {phase}."
+    if isinstance(exc, httpx.HTTPError):
+        return f"The retrieval service was unavailable during {phase}."
+    return f"An unexpected {type(exc).__name__} stopped the run during {phase}."
+
+
+def _finish_degraded(
+    store: RunStore,
+    run_id: str,
+    draft: Optional[Dict[str, Any]],
+    reason_code: str,
+    reason: str,
+    partial_findings: list,
+    error: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Record the failure and close the run as a degraded escalation."""
+    escalation = _build_degraded_escalation(
+        run_id=run_id,
+        draft=draft,
+        reason_code=reason_code,
+        reason=reason,
+        partial_findings=partial_findings,
+    )
+    store.append_event(
+        run_id=run_id,
+        agent="system",
+        step="error",
+        kind="degraded",
+        payload={"reason_code": reason_code, **error},
+    )
+    store.complete(run_id, escalation)
+    store.append_event(
+        run_id=run_id,
+        agent="system",
+        step="finalize",
+        kind="run_finished",
+        payload={"status": "escalated", "route": "escalate_to_human", "degraded": True},
+    )
+    return escalation
+
+
 def sweep_stale_runs(store: RunStore, max_age_s: int | None = None) -> int:
     """End orphaned runs after the worker hard limit and a recovery margin."""
     max_age_s = max_age_s or int(os.getenv("CELERY_TIME_LIMIT", "180")) + 60
@@ -238,12 +283,18 @@ def run_complaint_pipeline(
     complaint_payload.pop("_input_abuse_detected", None)
     draft: Optional[Dict[str, Any]] = None
     partial_findings: list = []
+    phase = "research"
+    attempt = 1
 
-    # ------------------------------------------------------------------ #
-    # Phase 1 — Researcher                                                 #
-    # ------------------------------------------------------------------ #
+    # Every failure between here and the finished determination ends the run as a degraded
+    # escalation straight away; nothing is left in `running` for the stale-run sweep to find.
     try:
+        # -------------------------------------------------------------- #
+        # Phase 1 — Researcher                                             #
+        # -------------------------------------------------------------- #
         draft = r_graph.run(run_id=run_id, complaint_fields=complaint_payload)
+        if not draft:
+            raise RuntimeError("researcher returned no draft")
         partial_findings = draft.get("citations", [])
 
         store.append_event(
@@ -258,62 +309,29 @@ def run_complaint_pipeline(
             },
         )
 
-    except LLMUnavailable as exc:
-        logger.warning("Researcher LLMUnavailable for run %s: %s", run_id, exc)
-        escalation = _build_degraded_escalation(
-            run_id=run_id,
-            draft=None,
-            reason_code="agent_failure",
-            reason=str(exc),
-            partial_findings=[],
-        )
-        store.append_event(
-            run_id=run_id,
-            agent="system",
-            step="error",
-            kind="degraded",
-            payload={
-                "reason_code": "agent_failure",
-                "agent": exc.agent,
-                "step": exc.step,
-                "error": str(exc),
-            },
-        )
-        store.complete(run_id, escalation)
-        store.append_event(
-            run_id=run_id,
-            agent="system",
-            step="finalize",
-            kind="run_finished",
-            payload={"status": "escalated", "route": "escalate_to_human", "degraded": True},
-        )
-        return escalation
+        # -------------------------------------------------------------- #
+        # Fault injection hook for Demo #6                                 #
+        # -------------------------------------------------------------- #
+        if inject_bad_draft or os.getenv("ORCAS_INJECT_BAD_DRAFT") == "1":
+            logger.info("Injecting fabricated citation into draft for Verifier test.")
+            draft["citations"] = list(draft.get("citations", []))
+            draft["citations"].append({
+                "citation_id": "fabricated_bad_chunk",
+                "doc_id": "fabricated_doc",
+                "doc_title": "Fake Act",
+                "circular_ref": "FAKE/2026/01",
+                "clause": "99",
+                "chunk_id": "non_existent_chunk_hash_123456",
+                "quote_span": "This phrase does not exist in any regulatory document.",
+            })
 
-    # ------------------------------------------------------------------ #
-    # Fault injection hook for Demo #6                                     #
-    # ------------------------------------------------------------------ #
-    if inject_bad_draft or os.getenv("ORCAS_INJECT_BAD_DRAFT") == "1":
-        logger.info("Injecting fabricated citation into draft for Verifier test.")
-        draft["citations"] = list(draft.get("citations", []))
-        draft["citations"].append({
-            "citation_id": "fabricated_bad_chunk",
-            "doc_id": "fabricated_doc",
-            "doc_title": "Fake Act",
-            "circular_ref": "FAKE/2026/01",
-            "clause": "99",
-            "chunk_id": "non_existent_chunk_hash_123456",
-            "quote_span": "This phrase does not exist in any regulatory document.",
-        })
+        # -------------------------------------------------------------- #
+        # Phase 2 — Verifier                                               #
+        # -------------------------------------------------------------- #
+        phase = "verify"
+        evidence_ledger = draft.get("_evidence_ledger", draft.get("citations", []))
+        max_attempts = _MAX_VERIFY_RETRIES
 
-    # ------------------------------------------------------------------ #
-    # Phase 2 — Verifier                                                   #
-    # ------------------------------------------------------------------ #
-    evidence_ledger = draft.get("_evidence_ledger", draft.get("citations", []))
-    max_attempts = _MAX_VERIFY_RETRIES
-    attempt = 1
-    v_res: Optional[Dict[str, Any]] = None
-
-    try:
         v_res = v_graph.verify(
             draft=draft,
             evidence_ledger=evidence_ledger,
@@ -337,67 +355,56 @@ def run_complaint_pipeline(
                 max_retries=max_attempts,
             )
 
-    except LLMUnavailable as exc:
-        logger.warning("Verifier LLMUnavailable for run %s: %s", run_id, exc)
-        escalation = _build_degraded_escalation(
-            run_id=run_id,
-            draft=draft,
-            reason_code="verification_unavailable",
-            reason=str(exc),
-            partial_findings=partial_findings,
-        )
         store.append_event(
             run_id=run_id,
-            agent="system",
-            step="error",
-            kind="degraded",
+            agent="verifier",
+            step="verify",
+            kind="verify",
             payload={
-                "reason_code": "verification_unavailable",
-                "agent": exc.agent,
-                "step": exc.step,
-                "error": str(exc),
+                "decision": v_res.get("decision"),
+                "passed": v_res.get("passed"),
+                "attempt": attempt,
+                "strategy": v_res.get("suggested_strategy"),
             },
         )
-        store.complete(run_id, escalation)
-        store.append_event(
-            run_id=run_id,
-            agent="system",
-            step="finalize",
-            kind="run_finished",
-            payload={"status": "escalated", "route": "escalate_to_human", "degraded": True},
+
+        # Finalise determination
+        final_determination = v_res.get("draft")
+        if not final_determination or v_res.get("decision") != "accept":
+            final_determination = v_graph._escalate_draft(
+                draft,
+                reason_code="unverified",
+                reason=v_res.get("reason", "Verification failed after retries."),
+                attempt=attempt,
+            )["draft"]
+
+        final_determination = _strip_internal(final_determination)
+
+        # -------------------------------------------------------------- #
+        # Phase 3 — Output Guardrail                                       #
+        # -------------------------------------------------------------- #
+        phase = "guardrail"
+        is_safe, filtered_det, guardrail_msg = OutputFilter.filter(final_determination)
+        filtered_det = _strip_internal(filtered_det)
+
+    except LLMUnavailable as exc:
+        logger.warning("LLM unavailable during %s for run %s: %s", phase, run_id, exc)
+        return _finish_degraded(
+            store, run_id, draft,
+            reason_code="verification_unavailable" if phase == "verify" else "agent_failure",
+            reason=str(exc),
+            partial_findings=partial_findings,
+            error={"agent": exc.agent, "step": exc.step, "error": str(exc)},
         )
-        return escalation
-
-    store.append_event(
-        run_id=run_id,
-        agent="verifier",
-        step="verify",
-        kind="verify",
-        payload={
-            "decision": v_res.get("decision"),
-            "passed": v_res.get("passed"),
-            "attempt": attempt,
-            "strategy": v_res.get("suggested_strategy"),
-        },
-    )
-
-    # Finalise determination
-    final_determination = v_res.get("draft")
-    if not final_determination or v_res.get("decision") != "accept":
-        final_determination = v_graph._escalate_draft(
-            draft,
-            reason_code="unverified",
-            reason=v_res.get("reason", "Verification failed after retries."),
-            attempt=attempt,
-        )["draft"]
-
-    final_determination = _strip_internal(final_determination)
-
-    # ------------------------------------------------------------------ #
-    # Phase 3 — Output Guardrail                                           #
-    # ------------------------------------------------------------------ #
-    is_safe, filtered_det, guardrail_msg = OutputFilter.filter(final_determination)
-    filtered_det = _strip_internal(filtered_det)
+    except Exception as exc:  # includes Celery's SoftTimeLimitExceeded and retrieval errors
+        logger.exception("Run %s failed during %s", run_id, phase)
+        return _finish_degraded(
+            store, run_id, draft,
+            reason_code="agent_failure",
+            reason=_failure_reason(exc, phase),
+            partial_findings=partial_findings,
+            error={"agent": "system", "step": phase, "error": f"{type(exc).__name__}: {exc}"[:500]},
+        )
 
     if guardrail_msg:
         store.append_event(
