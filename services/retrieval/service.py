@@ -80,6 +80,7 @@ class Retriever:
     def __init__(self, collection=None, cache=None, use_cache: bool = True):
         self._col = collection
         self._bm25: Optional[BM25Index] = None
+        self._bm25_version: Optional[str] = None
         self._cache = cache if cache is not None else (get_cache() if use_cache else None)
 
     @property
@@ -92,10 +93,21 @@ class Retriever:
         return (store.read_index_info() or {}).get("index_version", "")
 
     def _bm25_index(self) -> BM25Index:
-        if self._bm25 is None:
+        """Lexical index over the whole collection, rebuilt when a re-ingest changes the index."""
+        version = self.index_version()
+        if self._bm25 is None or version != self._bm25_version:
             data = self.col.get(include=["documents"])
             self._bm25 = BM25Index(data["ids"], data["documents"])
+            self._bm25_version = version
         return self._bm25
+
+    def _bm25_ids(self, query: str, where, n: int) -> List[str]:
+        """Top-n lexical hits that satisfy the same metadata filter as the dense search."""
+        index = self._bm25_index()
+        if not where:
+            return [cid for cid, _ in index.query(query, n)]
+        allowed = set(self.col.get(where=where, include=[])["ids"])
+        return [cid for cid, _ in index.query(query, len(index.ids)) if cid in allowed][:n]
 
     def _dense_pool(self, query: str, where, n: int):
         docs = OrcasDenseRetriever(collection=self.col, k=n, where=where).invoke(query)
@@ -124,8 +136,7 @@ class Retriever:
         dense_ids, pool = self._dense_pool(req.query, where, pool_n)
 
         if req.mode == SearchMode.hybrid:
-            bm25_hits = self._bm25_index().query(req.query, pool_n)
-            bm25_ids = [cid for cid, _ in bm25_hits]
+            bm25_ids = self._bm25_ids(req.query, where, pool_n)
             # fetch metadata/text for bm25-only ids
             missing = [cid for cid in bm25_ids if cid not in pool]
             if missing:

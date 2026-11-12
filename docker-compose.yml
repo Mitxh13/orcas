@@ -37,6 +37,8 @@ services:
     build:
       context: .
       dockerfile: services/ingest/Dockerfile
+      args:
+        EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
     environment:
       ORCAS_DATA_DIR: /data
       EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
@@ -48,6 +50,8 @@ services:
     build:
       context: .
       dockerfile: services/retrieval/Dockerfile
+      args:
+        EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
     environment:
       ORCAS_CHROMA_DIR: /data/chroma
       ORCAS_INDEX_INFO: /data/index_info.json
@@ -319,6 +323,8 @@ services:
     build:
       context: .
       dockerfile: services/retrieval/Dockerfile
+      args:
+        EMBED_MODEL: ${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
     command: ["python", "-m", "eval.live_scorer", "--loop", "60"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
