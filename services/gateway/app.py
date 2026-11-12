@@ -55,8 +55,16 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     store = store or PostgresRunStore()
     dispatcher = dispatcher or CeleryDispatcher()
+    # Two capacities. The per-client and invalid-input buckets use RATE_LIMIT_PER_MIN. The bucket
+    # shared by everything from one source IP is wider (RATE_LIMIT_IP_PER_MIN): behind Compose
+    # every host-side client arrives from the same bridge address, so one narrow IP bucket
+    # throttled the web client, scripts and load test together. An injected limiter serves both.
+    ip_limiter = limiter
     if limiter is None and os.getenv("REDIS_URL"):
-        limiter = RedisRateLimiter(os.environ["REDIS_URL"], int(os.getenv("RATE_LIMIT_PER_MIN", "60")))
+        per_client = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
+        per_ip = max(per_client, int(os.getenv("RATE_LIMIT_IP_PER_MIN", "600")))
+        limiter = RedisRateLimiter(os.environ["REDIS_URL"], per_client)
+        ip_limiter = RedisRateLimiter(os.environ["REDIS_URL"], per_ip)
     if cache is None and os.getenv("REDIS_URL") and os.getenv("RETRIEVAL_SERVICE_URL"):
         cache = RedisRunCache(
             os.environ["REDIS_URL"], int(os.getenv("RUN_CACHE_TTL_S", "3600")),
@@ -121,11 +129,12 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
         raw = from_thread.run(request.body)
         client_ip = request.client.host if request.client else "unknown"
 
-        def enforce_limit(bucket: str):
-            if limiter is None:
+        def enforce_limit(bucket: str, bucket_limiter=None):
+            bucket_limiter = bucket_limiter or limiter
+            if bucket_limiter is None:
                 return None
             try:
-                retry_after = limiter.retry_after(bucket)
+                retry_after = bucket_limiter.retry_after(bucket)
             except Exception:
                 logger.exception("rate limiter unavailable")
                 raise HTTPException(status_code=503, detail="rate limiter unavailable")
@@ -139,7 +148,7 @@ def create_app(store=None, dispatcher=None, limiter=None, cache=None) -> FastAPI
 
         # This bucket protects parsing and quarantine even when client_id is
         # missing, invalid, or changed on every request.
-        limited = enforce_limit(f"ip:{client_ip}")
+        limited = enforce_limit(f"ip:{client_ip}", ip_limiter)
         if limited is not None:
             return limited
         try:

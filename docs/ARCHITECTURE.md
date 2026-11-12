@@ -133,7 +133,9 @@ Polling vs callback: polling is chosen as the default because the caller is a si
 
 ## 4. Agent topology (worker)
 
-Two agents with distinct responsibilities and a defined hand-off. They are separate LangGraph graphs with separate prompts, tool permissions and state schemas; the Verifier cannot call search tools that mutate the Researcher's evidence.
+Two agents with distinct responsibilities and a defined hand-off. The Researcher is a LangGraph state graph. The Verifier is a separate class with its own prompt and a read-only retrieval client that exposes only chunk lookup, so it cannot search or change the Researcher's evidence. Both run in the worker process and share one LLM client.
+
+In the current build the Researcher's plan step always issues `search_corpus`, with the query and framework chosen by the reflect step. `get_clause` is used by the cross-reference retry strategy (§4.2). `get_complaint_fields` and `list_framework_scope` are implemented and permitted but no step selects them.
 
 | Agent | Responsibility | Tools it may call |
 |---|---|---|
@@ -166,6 +168,7 @@ stateDiagram-v2
 Researcher → Verifier payload: `{complaint_fields, evidence_ledger[{chunk_id, text, query, tool, step}], draft_determination, claims[{text, citation_ids}]}`. Verifier → Researcher: `{decision, failed_claims, suggested_strategy}`.
 
 ### 4.2 Retry strategies (rotated, never repeated)
+On a `retry` decision the worker returns the draft to the Researcher, which keeps the run's ledger, queries and budget, runs one strategy, and writes a new draft with the Verifier's reason attached. The Verifier's `suggested_strategy` is tried first; a strategy with nothing new to fetch falls through to the next. With the default `MAX_VERIFY_RETRIES=2` a run gets one retry.
 1. **Query rewrite from what was read**: build a new query from terms in retrieved passages (e.g., the product or entity class named in a scope clause).
 2. **Framework swap**: search the *other* regulator's corpus using the product/entity extracted (this is the step that fixes the §4.1 bank-FD case).
 3. **Cross-reference follow**: fetch clauses referenced by id from retrieved passages via `get_clause`.
@@ -173,11 +176,11 @@ Researcher → Verifier payload: `{complaint_fields, evidence_ledger[{chunk_id, 
 ### 4.3 Failure behaviour
 | Failure | Behaviour |
 |---|---|
-| Researcher crashes / times out mid-run | Run ends `escalated` with `reason_code=agent_failure`, partial evidence attached, `degraded=true`. Celery retry only if the failure was before the first LLM call (idempotent restart). |
+| Researcher fails mid-run (LLM unavailable, retrieval error, soft time limit, any other exception) | Run ends `escalated` at once with `reason_code=agent_failure` and `degraded=true`; citations of a draft already written are kept as partial findings. The task is not retried. |
 | Verifier unavailable or times out | **Never return unverified.** Escalate with `reason_code=verification_unavailable`. |
 | Loop budget exhausted (steps / tool calls / wall clock) | Escalate with `reason_code=budget_exhausted`. |
 | LLM provider circuit open | Fallback chain (below); if none usable, escalate or honest error, never a stack trace. |
-| Worker killed | Celery `acks_late` redelivers; run-store keys make the restart idempotent; run events show the duplicate attempt. |
+| Worker killed | Celery `acks_late` redelivers after the visibility timeout (hard limit + 60 s) and run-store keys make the restart idempotent. The stale-run sweep closes a run still `running` at that age as `agent_failure`, so in practice a run killed mid-flight usually ends escalated. |
 
 ### 4.4 Escalation triggers (F7)
 Complaint spans two regulators · entity type outside corpus (e.g., insurer, pension fund, exchange not covered) · classification confidence below threshold · verification fails after retries · budget exhausted · guardrail flags · degraded dependency.
@@ -223,14 +226,15 @@ flowchart TD
     CB -->|"open"| FB
     CB2 --> FB["fallback chain"]
     FB --> P2["secondary model/provider"]
-    FB --> CACHE["cached response<br/>if identical prompt hash"]
-    FB --> ERR["honest error: degraded=true<br/>worker escalates"]
+    FB --> ERR["honest error: HTTP 503<br/>worker escalates, degraded=true"]
     P1 -->|"ok"| ACC["token + cost accounting<br/>per step"]
     P2 --> ACC
     ACC --> OUT["response + usage + cost"]
 ```
 
 Every degraded or retried path sets flags that surface in the result (`degraded`) and in metrics. No path returns a confident answer from an incomplete run.
+
+All attempts, backoff waits and the fallback call share one budget per request (`LLM_TOTAL_BUDGET_SECONDS`); the worker waits that budget plus a margin. A provider `429` is retried after its `Retry-After`, and when that wait does not fit the budget the gateway returns `503` with the same header. There is no response cache in the gateway; repeated complaints are served by the run cache (§7).
 
 ## 7. Data stores
 

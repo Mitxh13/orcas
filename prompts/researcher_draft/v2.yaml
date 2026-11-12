@@ -13,9 +13,9 @@ template: |
      "escalate_to_human"      — ambiguous, split regulators, or out-of-corpus
   2. regulator must be: "SEBI", "RBI", or "UNDETERMINED"
   3. Every claim in "basis" must cite by evidence number, e.g. [E1].
-  4. Citations must only reference items listed below.
+  4. Citations must only reference items listed below, by their number. Do not write
+     document names, clause numbers or ids for a citation; they are filled in from the item.
   5. quote_span must be a verbatim extract of 25 words or fewer from that item's text.
-  6. Never cite a scope_card item as substantive evidence.
 
   Entity Classification:
   {classification}
@@ -34,11 +34,6 @@ template: |
       {
         "citation_id": "c1",
         "evidence_number": "E1",
-        "doc_id": "...",
-        "doc_title": "...",
-        "circular_ref": "...",
-        "clause": "...",
-        "chunk_id": "...",
         "quote_span": "<verbatim text from the evidence item, ≤25 words>"
       }
     ]
@@ -52,4 +47,4 @@ variables:
   - complaint_text
   - classification
   - evidence_items
-changelog: "v2: Numbered evidence items [E1..En]; quote_span ≤25 words; complaint wrapped in XML tags (M3, M11)"
+changelog: "v2: Numbered evidence items [E1..En], one JSON object per line; the model returns an evidence number and a quote and code fills in the chunk, document and clause; quote_span ≤25 words; complaint wrapped in XML tags (M3, M11)"

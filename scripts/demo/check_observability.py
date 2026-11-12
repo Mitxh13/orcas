@@ -10,7 +10,8 @@ import time
 import urllib.parse
 import urllib.request
 
-REQUIRED_JOBS = {"gateway", "retrieval", "llm-gateway", "worker-metrics", "cadvisor"}
+REQUIRED_JOBS = {"gateway", "retrieval", "llm-gateway", "worker-metrics"}
+RESOURCE_JOB = "cadvisor"  # only runs with `docker compose --profile resources`
 REQUIRED_SERIES = {"orcas_gateway_requests_total", "orcas_run_latency_seconds",
                    "orcas_celery_queue_depth", "orcas_eval_score",
                    "orcas_run_tokens_by_step", "orcas_run_cost_by_step_usd"}
@@ -21,13 +22,21 @@ def read_json(url: str) -> dict:
         return json.load(response)
 
 
-def check(prometheus_url: str, grafana_url: str) -> tuple[set[str], int]:
+def resources_profile_running() -> bool:
+    """True when the cAdvisor container of the optional `resources` profile is up."""
+    container = subprocess.check_output(
+        ["docker", "compose", "ps", "-q", RESOURCE_JOB], text=True
+    ).strip()
+    return bool(container)
+
+
+def check(prometheus_url: str, grafana_url: str, resources: bool) -> tuple[set[str], int]:
     targets = read_json(f"{prometheus_url}/api/v1/targets?state=active")
     healthy_jobs = {
         target["labels"]["job"] for target in targets["data"]["activeTargets"]
         if target.get("health") == "up"
     }
-    missing_jobs = REQUIRED_JOBS - healthy_jobs
+    missing_jobs = (REQUIRED_JOBS | ({RESOURCE_JOB} if resources else set())) - healthy_jobs
     if missing_jobs:
         raise ValueError(f"Prometheus targets are not healthy: {sorted(missing_jobs)}")
 
@@ -40,6 +49,10 @@ def check(prometheus_url: str, grafana_url: str) -> tuple[set[str], int]:
     dashboard = read_json(f"{grafana_url}/api/dashboards/uid/orcas-platform")["dashboard"]
     if dashboard.get("uid") != "orcas-platform" or len(dashboard.get("panels", [])) < 24:
         raise ValueError("The ORCAS dashboard was not provisioned with its expected panels")
+    if not resources:
+        print("Container CPU and memory panels not checked: start the stack with "
+              "`docker compose --profile resources up -d` to include them.")
+        return healthy_jobs, len(dashboard["panels"])
     for panel in dashboard["panels"]:
         if panel["id"] not in {11, 12}:
             continue
@@ -77,12 +90,18 @@ def main() -> int:
     parser.add_argument("--prometheus-url", default="http://localhost:9090")
     parser.add_argument("--grafana-url", default="http://localhost:3000")
     parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--resources", choices=["auto", "require", "skip"], default="auto",
+                        help="check cAdvisor and the container resource panels: auto = only "
+                             "when the `resources` profile is running")
     args = parser.parse_args()
+    resources = (args.resources == "require" or
+                 (args.resources == "auto" and resources_profile_running()))
     deadline = time.monotonic() + args.timeout
     last_error = None
     while time.monotonic() < deadline:
         try:
-            jobs, panels = check(args.prometheus_url.rstrip("/"), args.grafana_url.rstrip("/"))
+            jobs, panels = check(args.prometheus_url.rstrip("/"), args.grafana_url.rstrip("/"),
+                                 resources)
             print(f"Live Prometheus targets: {', '.join(sorted(jobs))}; Grafana panels: {panels}")
             return 0
         except (OSError, subprocess.CalledProcessError, KeyError, ValueError) as error:

@@ -35,8 +35,23 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Lint platform code
         run: ruff check --isolated --select E4,E7,E9,F,I libs services/gateway services/metrics_exporter services/worker/tasks.py services/worker/clients/retrieval.py services/worker/clients/observed_retrieval.py services/worker/clients/llm_client.py services/retrieval/app.py services/llm_gateway/app.py scripts/doctor.py scripts/check_repository.py scripts/demo scripts/benchmarks loadtest/locustfile.py tests/platform
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: embedding-model-${{ hashFiles('services/corpus_common/constants.py') }}
+      - name: Build the retrieval index
+        run: python -m services.ingest
       - name: Test services and contracts
-        run: python -m pytest tests -q
+        # Retrieval, evaluation and reference-case tests skip when no index exists. Here the
+        # index was just built, so a skip for that reason means the tests did not run.
+        run: |
+          set -o pipefail
+          python -m pytest tests -q -rs | tee pytest-output.txt
+          if grep -q "index not built" pytest-output.txt; then
+            echo "Index-backed tests were skipped although the index was built." >&2
+            exit 1
+          fi
       - name: Check tracked configuration and credentials
         run: python scripts/check_repository.py
       - name: Compile load and operations scripts
@@ -66,7 +81,7 @@ jobs:
       - name: Verify cross-service Jaeger trace
         run: python scripts/demo/check_jaeger_trace.py --timeout 90
       - name: Verify Prometheus data and Grafana provisioning
-        run: python scripts/demo/check_observability.py --timeout 90
+        run: python scripts/demo/check_observability.py --timeout 90 --resources require
       - name: Verify rejected input did not create a run
         run: |
           docker compose exec -T gateway python -c "import os, psycopg; connection = psycopg.connect(os.environ['DATABASE_URL']); counts = connection.execute('SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM quarantine)').fetchone(); assert counts == (1, 1), counts"
@@ -74,6 +89,14 @@ jobs:
         run: |
           python scripts/demo/check_guardrail_rejection.py
           docker compose exec -T gateway python -c "import os, psycopg; connection = psycopg.connect(os.environ['DATABASE_URL']); counts = connection.execute('SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM quarantine)').fetchone(); assert counts == (1, 2), counts"
+      - name: Demo 5 - out-of-corpus complaint escalates
+        run: python scripts/demo/agent_demos.py out-of-corpus
+      - name: Demo 6 - verifier rejects a planted citation
+        run: python scripts/demo/agent_demos.py bad-draft
+      - name: Demo 8 - provider outage degrades to escalation
+        run: python scripts/demo/agent_demos.py provider-outage
+      - name: Restored stack still completes a fresh run
+        run: python scripts/demo/agent_demos.py out-of-corpus
       - name: Show service status and logs on failure
         if: failure()
         run: |

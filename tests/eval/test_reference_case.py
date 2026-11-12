@@ -60,8 +60,6 @@ def test_reference_case_is_referred_to_rbi(run):
     assert (run.route, run.regulator) == ("refer_to_other_regulator", "RBI")
 
 
-@pytest.mark.xfail(strict=True, reason="stub mode cites RBI clause 10 (non-maintainability); "
-                                       "Mitesh's M3/M4 fix it, then delete this marker")
 def test_reference_case_cites_the_deciding_clauses_not_non_maintainability(run):
     rbi_clauses = {c["clause"] for c in run.details["citations"] if c["doc_id"] == RBI}
     assert rbi_clauses & DECIDING

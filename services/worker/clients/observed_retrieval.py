@@ -45,8 +45,11 @@ class ObservedRetrievalClient:
                             "chunk_id": p.get("chunk_id"),
                             "doc_id": p.get("doc_id"),
                             "clause_id": p.get("clause_id"),
-                            "quote_span": p.get("quote_span"),
-                            "text": p.get("text", "")[:500],
+                            "framework": p.get("framework"),
+                            "chunk_type": p.get("chunk_type"),
+                            # Whole passage: the evaluation judge and the live scorer score
+                            # claims against this text, so a cut-off copy understates support.
+                            "text": p.get("text", ""),
                         }
                         for p in results
                     ],
@@ -71,7 +74,10 @@ class ObservedRetrievalClient:
                     "doc_id": doc_id,
                     "clause_id": clause_id,
                     "found": result is not None,
-                    "chunk_id": result.get("chunk_id") if result else None,
+                    # The service returns a clause with all its chunk ids.
+                    "chunk_ids": (result.get("chunk_ids") or
+                                  ([result["chunk_id"]] if result.get("chunk_id") else []))
+                    if result else [],
                 },
             )
         return result
