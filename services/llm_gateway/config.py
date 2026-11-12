@@ -20,7 +20,6 @@ import os
 
 class GatewayConfig:
     # ---- Primary model ------------------------------------------------
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "")          # no hard-coded default
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")      # empty = Ollama / keyless
     LLM_API_BASE: str = os.getenv("LLM_API_BASE", "")    # custom or Ollama base URL

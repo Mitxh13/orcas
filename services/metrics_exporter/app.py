@@ -59,6 +59,13 @@ def collect_snapshot() -> dict:
             "FROM run_events WHERE agent IN ('researcher', 'verifier') "
             "AND ts > NOW() - INTERVAL '1 hour' GROUP BY agent"
         ).fetchall()
+        # A researcher that fails writes no draft event, only the system 'degraded' event, so
+        # its failed attempts have to be counted separately or its success ratio is always 1.
+        researcher_failures = connection.execute(
+            "SELECT COUNT(*) FROM run_events WHERE kind = 'degraded' "
+            "AND payload->>'reason_code' = 'agent_failure' "
+            "AND ts > NOW() - INTERVAL '1 hour'"
+        ).fetchone()[0]
         feedback = dict(connection.execute(
             "SELECT rating, COUNT(*) FROM feedback GROUP BY rating"
         ).fetchall())
@@ -90,6 +97,7 @@ def collect_snapshot() -> dict:
             "feedback": feedback, "scores": scores, "step_latency": step_latency,
             "llm_by_step": llm_by_step, "uncached_terminal": uncached_terminal,
             "escalations": escalations, "degraded": degraded, "agent_rows": agent_rows,
+            "researcher_failures": researcher_failures,
             "agent_step_latency": agent_step_latency,
             "queue_depth": queue_depth}
 
@@ -148,10 +156,18 @@ def render_metrics(snapshot: dict) -> bytes:
     for reason, count in snapshot.get("escalations", []):
         reason_gauge.labels(reason or "unknown").set(count)
     gauge("orcas_run_degraded", "Degraded runs in the last hour").set(snapshot.get("degraded", 0))
-    agent_success = gauge("orcas_agent_success_ratio", "Successful draft or verification events", ["agent"])
+    agent_success = gauge(
+        "orcas_agent_success_ratio",
+        "Researcher: drafts over drafts plus failed attempts. Verifier: verifications passed", ["agent"])
     agent_steps = gauge("orcas_agent_steps_per_run", "Agent events per run in the last hour", ["agent"])
     agent_tools = gauge("orcas_agent_tool_calls_per_run", "Agent tool calls per run in the last hour", ["agent"])
-    for agent, runs, steps, tools, attempts, successes in snapshot.get("agent_rows", []):
+    rows = {row[0]: row for row in snapshot.get("agent_rows", [])}
+    failures = snapshot.get("researcher_failures", 0)
+    if failures and "researcher" not in rows:
+        rows["researcher"] = ("researcher", 0, 0, 0, 0, 0)  # every attempt in the window failed
+    for agent, runs, steps, tools, attempts, successes in rows.values():
+        if agent == "researcher":
+            attempts += failures
         agent_success.labels(agent).set(successes / attempts if attempts else 0)
         agent_steps.labels(agent).set(steps / runs if runs else 0)
         agent_tools.labels(agent).set(tools / runs if runs else 0)

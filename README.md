@@ -94,7 +94,7 @@ On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The 
 docker compose up -d
 ```
 
-For a hosted provider, set `ORCAS_STUB_MODE=false`, `LLM_PROVIDER`,
+For a hosted provider, set `ORCAS_STUB_MODE=false`,
 `LLM_MODEL=<provider>/<model>`, and `LLM_API_KEY` in the private `.env` file.
 Set pricing and fallback variables only when those values are known. Recreate
 the gateway with `docker compose up -d --force-recreate llm-gateway` and check

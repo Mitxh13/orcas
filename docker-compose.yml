@@ -96,7 +96,6 @@ services:
       STUB_SERVICE_URL: http://llm-stub:8003
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE: ${LLM_API_BASE:-}
       LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
@@ -201,6 +200,7 @@ services:
       ORCAS_ADMIN_TOKEN: ${ORCAS_ADMIN_TOKEN:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
+      RATE_LIMIT_IP_PER_MIN: ${RATE_LIMIT_IP_PER_MIN:-600}
       RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
       RETRIEVAL_SERVICE_URL: ${RETRIEVAL_SERVICE_URL:-http://retrieval:8001}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -336,6 +336,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-orcas}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-orcas}
       LIVE_SCORE_SAMPLE_RATE: ${LIVE_SCORE_SAMPLE_RATE:-0.2}
       HF_HOME: /opt/models
+    # The image's own health check probes the retrieval API on :8001, which this batch loop
+    # does not serve; without this the container is reported unhealthy forever.
+    healthcheck:
+      disable: true
     depends_on:
       migrate:
         condition: service_completed_successfully
