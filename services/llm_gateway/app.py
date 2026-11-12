@@ -98,6 +98,7 @@ except ImportError:
 
 try:
     import litellm
+    litellm.drop_params = True  # drop request options a provider does not support
     LITELLM_AVAILABLE = True
 except ImportError:
     LITELLM_AVAILABLE = False
@@ -208,6 +209,7 @@ async def _litellm_call(
     api_key: str,
     api_base: str,
     is_fallback: bool = False,
+    timeout: Optional[float] = None,
 ) -> ChatResponse:
     """Single LiteLLM call with timeout; returns ChatResponse."""
     if not LITELLM_AVAILABLE:
@@ -224,11 +226,12 @@ async def _litellm_call(
     if api_base:
         kwargs["api_base"] = api_base
 
-    kwargs["response_format"] = {"type": "json_object"}
+    if config.LLM_JSON_MODE:
+        kwargs["response_format"] = {"type": "json_object"}
 
     response = await asyncio.wait_for(
         litellm.acompletion(**kwargs),
-        timeout=config.LLM_TIMEOUT_SECONDS,
+        timeout=timeout if timeout is not None else config.LLM_TIMEOUT_SECONDS,
     )
 
     reply_text = response.choices[0].message.content or ""
@@ -254,6 +257,42 @@ async def _litellm_call(
         model=model,
         degraded=is_fallback,
     )
+
+
+# ---------------------------------------------------------------------------
+# Retry timing
+# ---------------------------------------------------------------------------
+
+def _is_rate_limited(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) == 429 or type(exc).__name__ == "RateLimitError"
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """Seconds the provider asked us to wait (``Retry-After``), if it said."""
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    try:
+        return max(0.0, float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _backoff_seconds(exc: Exception, attempt: int) -> float:
+    """Honour the provider's Retry-After on a 429; otherwise exponential backoff with jitter."""
+    retry_after = _retry_after_seconds(exc) if _is_rate_limited(exc) else None
+    if retry_after is not None:
+        return retry_after
+    base_delay = (2.0 if _is_rate_limited(exc) else 0.5) * (2 ** attempt)
+    return base_delay + base_delay * random.uniform(-0.25, 0.25)
+
+
+def _exhausted(last_exc: Optional[Exception], reason: str) -> HTTPException:
+    """503 for the worker; carries Retry-After when the provider was rate limiting."""
+    headers = None
+    if last_exc is not None and _is_rate_limited(last_exc):
+        wait = _retry_after_seconds(last_exc)
+        headers = {"Retry-After": str(int(wait if wait is not None else config.BREAKER_COOLDOWN_S))}
+    return HTTPException(status_code=503, detail=f"{reason} Last error: {last_exc}", headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +350,10 @@ async def chat_completion(request: ChatRequest):
 
     max_retries = 2
     last_exc: Optional[Exception] = None
+    deadline = t0 + config.LLM_TOTAL_BUDGET_SECONDS
+
+    def remaining() -> float:
+        return deadline - time.time()
 
     for attempt in range(max_retries + 1):
         if config.LLM_FORCE_FAIL:
@@ -335,6 +378,7 @@ async def chat_completion(request: ChatRequest):
                 api_key=config.LLM_API_KEY,
                 api_base=config.LLM_API_BASE,
                 is_fallback=False,
+                timeout=min(config.LLM_TIMEOUT_SECONDS, max(remaining(), 0.1)),
             )
             breaker.record_success()
             if PROM_AVAILABLE:
@@ -352,18 +396,21 @@ async def chat_completion(request: ChatRequest):
         except Exception as exc:
             last_exc = exc
             logger.warning("LLM call attempt %d/%d failed: %s", attempt + 1, max_retries + 1, exc)
-            if attempt < max_retries:
-                base_delay = 0.5 * (2 ** attempt)
-                jitter = base_delay * random.uniform(-0.25, 0.25)
-                await asyncio.sleep(base_delay + jitter)
+            # Retry only if the wait and at least a short attempt still fit in the total budget.
+            delay = _backoff_seconds(exc, attempt)
+            if attempt < max_retries and delay + 1.0 < remaining():
+                await asyncio.sleep(delay)
             else:
                 breaker.record_failure()
                 if PROM_AVAILABLE:
                     CIRCUIT_BREAKER_TRIPS.inc()
-                    LLM_REQUEST_COUNTER.labels(agent=agent_label, model=target_model, status="error").inc()
+                    LLM_REQUEST_COUNTER.labels(
+                        agent=agent_label, model=target_model,
+                        status="rate_limited" if _is_rate_limited(exc) else "error").inc()
+                break
 
     # --- Fallback model ---
-    if config.LLM_FALLBACK_MODEL:
+    if config.LLM_FALLBACK_MODEL and remaining() > 1.0:
         logger.info("Primary exhausted; trying fallback model: %s", config.LLM_FALLBACK_MODEL)
         try:
             res = await _litellm_call(
@@ -373,6 +420,7 @@ async def chat_completion(request: ChatRequest):
                 api_key=config.LLM_FALLBACK_API_KEY,
                 api_base=config.LLM_FALLBACK_API_BASE,
                 is_fallback=True,
+                timeout=min(config.LLM_TIMEOUT_SECONDS, remaining()),
             )
             if PROM_AVAILABLE:
                 LLM_LATENCY_HISTOGRAM.labels(agent=agent_label, model=res.model).observe(time.time() - t0)
@@ -380,7 +428,4 @@ async def chat_completion(request: ChatRequest):
         except Exception as fb_exc:
             logger.error("Fallback model failed: %s", fb_exc)
 
-    raise HTTPException(
-        status_code=503,
-        detail=f"All LLM retries and fallback exhausted. Last error: {last_exc}",
-    )
+    raise _exhausted(last_exc, "All LLM retries and fallback exhausted.")

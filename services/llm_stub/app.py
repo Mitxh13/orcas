@@ -58,14 +58,30 @@ def _is_non_maintainability(item: dict) -> bool:
         item.get("framework") == "RBI" and _clause_of(item) == "10")
 
 
+_EVIDENCE_ITEM = re.compile(r"^\s*\[(E\d+)\]\s*(\{.*\})\s*$", re.MULTILINE)
+
+
+def _evidence_in_prompt(prompt: str) -> list | None:
+    """Evidence shown to the draft step: a JSON ledger (v1) or numbered ``[E1] {json}`` lines (v2)."""
+    match = re.search(r"Evidence Ledger:\s*(\[[^\r\n]*\])", prompt)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+    items = []
+    for number, body in _EVIDENCE_ITEM.findall(prompt):
+        try:
+            items.append({**json.loads(body), "evidence_number": number})
+        except json.JSONDecodeError:
+            continue
+    return items if items or "Evidence items:" in prompt else None
+
+
 def citation_from_evidence(prompt: str, framework: str) -> dict | None:
     """Pick an exact quote from retrieved evidence in the draft prompt."""
-    match = re.search(r"Evidence Ledger:\s*(\[[^\r\n]*\])", prompt)
-    if not match:
-        return None
-    try:
-        ledger = json.loads(match.group(1))
-    except json.JSONDecodeError:
+    ledger = _evidence_in_prompt(prompt)
+    if ledger is None:
         return None
     candidates = [item for item in ledger if item.get("framework") == framework
                   and item.get("chunk_type", "clause") != "scope_card" and item.get("text")]
@@ -87,6 +103,10 @@ def citation_from_evidence(prompt: str, framework: str) -> dict | None:
     phrase = next((word for word in keywords if word in passage.lower()), "")
     start = max(0, passage.lower().find(phrase) - 30) if phrase else 0
     quote_span = passage[start:start + 180]
+    if selected.get("evidence_number"):
+        # Draft prompt v2: cite by number; the worker fills in the chunk and document.
+        return {"citation_id": "c1", "evidence_number": selected["evidence_number"],
+                "quote_span": quote_span}
     return {
         "citation_id": "c1",
         "doc_id": selected.get("doc_id", ""),
@@ -369,7 +389,7 @@ def generate_stub_reply(request: ChatRequest) -> str:
                 "citations": [],
             })
 
-        has_ledger = "Evidence Ledger:" in combined
+        has_ledger = "Evidence Ledger:" in combined or "Evidence items:" in combined
 
         if is_rbi:
             citation = citation_from_evidence(combined, "RBI")

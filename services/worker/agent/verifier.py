@@ -197,9 +197,19 @@ class VerifierGraph:
         passed = ver_json.get("passed", False)
 
         # Derive claims_checked / claims_supported from LLM's claims list
-        claims = ver_json.get("claims", [])
-        claims_checked = ver_json.get("claims_checked", len(claims) or len(citations))
-        claims_supported = ver_json.get("claims_supported", sum(1 for c in claims if c.get("supported", False)))
+        # Derive the counts from the claims list when the model gives one. The v1 prompt asks
+        # only for unsupported claims, so otherwise: checked = citations, supported = the rest.
+        claims = [c for c in ver_json.get("claims") or [] if isinstance(c, dict)]
+        unsupported = ver_json.get("unsupported_claims") or []
+        if claims:
+            claims_checked = len(claims)
+            claims_supported = sum(1 for c in claims if c.get("supported", False))
+        else:
+            claims_checked = max(len(citations), len(unsupported))
+            claims_supported = claims_checked - len(unsupported)
+        claims_checked = self._count(ver_json.get("claims_checked"), claims_checked)
+        claims_supported = min(claims_checked,
+                               self._count(ver_json.get("claims_supported"), claims_supported))
 
         if not passed or ver_json.get("decision") != "accept":
             return self._retry_or_escalate(
@@ -290,6 +300,11 @@ class VerifierGraph:
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _count(value: Any, default: int) -> int:
+        """A model-supplied count if it is a non-negative integer, else our own."""
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
 
     @staticmethod
     def _passages_for_prompt(citations: List[Dict[str, Any]],

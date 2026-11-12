@@ -105,6 +105,7 @@ services:
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       LLM_TOTAL_BUDGET_SECONDS: ${LLM_TOTAL_BUDGET_SECONDS:-90}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.0}
+      LLM_JSON_MODE: ${LLM_JSON_MODE:-true}
       BREAKER_FAILURES: ${BREAKER_FAILURES:-3}
       BREAKER_COOLDOWN_S: ${BREAKER_COOLDOWN_S:-30}
       LLM_PRICE_INPUT_PER_M: ${LLM_PRICE_INPUT_PER_M:-0}
@@ -114,6 +115,10 @@ services:
       LLM_FORCE_FAIL: ${LLM_FORCE_FAIL:-0}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Published on the loopback interface only, for `make eval-live`, `make experiment` and
+    # scripts/demo/kill_provider.sh, which call the gateway from the host.
+    ports:
+      - "127.0.0.1:8002:8002"
     depends_on:
       llm-stub:
         condition: service_healthy
@@ -135,13 +140,14 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
       RETRIEVAL_SERVICE_URL: ${RETRIEVAL_SERVICE_URL:-http://retrieval:8001}
       LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway:8002}
+      LLM_TOTAL_BUDGET_SECONDS: ${LLM_TOTAL_BUDGET_SECONDS:-90}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RUN_CACHE_TTL_S: ${RUN_CACHE_TTL_S:-3600}
       MAX_STEPS: ${MAX_STEPS:-10}
       MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-8}
       RUN_WALL_CLOCK_S: ${RUN_WALL_CLOCK_S:-45}
       MAX_VERIFY_RETRIES: ${MAX_VERIFY_RETRIES:-2}
-      PROMPT_RESEARCHER_CLASSIFY: ${PROMPT_RESEARCHER_CLASSIFY:-v1}
+      PROMPT_RESEARCHER_CLASSIFY: ${PROMPT_RESEARCHER_CLASSIFY:-v3}
       PROMPT_RESEARCHER_REFLECT: ${PROMPT_RESEARCHER_REFLECT:-v2}
       PROMPT_RESEARCHER_DRAFT: ${PROMPT_RESEARCHER_DRAFT:-v1}
       PROMPT_VERIFIER: ${PROMPT_VERIFIER:-v1}
