@@ -40,11 +40,13 @@ class GatewayConfig:
     # ---- Timeouts -------------------------------------------------------
     # Per-attempt timeout for a single LiteLLM call.
     LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "30.0"))
-    # Total budget for the gateway (retries + fallback).
-    # The worker's client timeout must be longer than this.
+    # Total budget for one /v1/chat request: every attempt, backoff wait and the fallback call
+    # fit inside it. The worker's client timeout is this value plus a margin.
     LLM_TOTAL_BUDGET_SECONDS: float = float(os.getenv("LLM_TOTAL_BUDGET_SECONDS", "90.0"))
 
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+    # Ask the provider for a JSON object. Providers that do not support it ignore the setting.
+    LLM_JSON_MODE: bool = os.getenv("LLM_JSON_MODE", "true").lower() in ("true", "1", "yes")
 
     # ---- Circuit breaker -----------------------------------------------
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")

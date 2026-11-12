@@ -912,3 +912,139 @@ def test_wall_clock_limit_at_drafting_still_produces_a_determination(
     assert draft["escalation"]["reason_code"] == "budget_exhausted"
     jsonschema.validate(instance={k: v for k, v in draft.items() if not k.startswith("_")},
                         schema=DETERMINATION_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Evidence-numbered citations and draft clean-up (M3)
+# ---------------------------------------------------------------------------
+
+LEDGER = [
+    {"chunk_id": "scope-1", "chunk_type": "scope_card", "framework": "RBI", "text": "SCOPE (RBI)"},
+    {"chunk_id": "chunk-a", "doc_id": "doc-a", "doc_title": "Scheme A", "circular_ref": "A/1",
+     "clause_id": "9", "framework": "RBI", "text": "Any customer aggrieved may file a complaint."},
+    {"chunk_id": "chunk-b", "doc_id": "doc-b", "doc_title": "Circular B", "circular_ref": "B/2",
+     "clause_id": "2", "framework": "SEBI", "text": "Grievances are redressed within 21 days."},
+]
+
+
+def test_evidence_items_number_only_citable_passages(researcher_graph):
+    lines = researcher_graph._evidence_items(LEDGER).splitlines()
+    assert [line.split(" ", 1)[0] for line in lines] == ["[E1]", "[E2]"]
+    assert json.loads(lines[0].split(" ", 1)[1])["clause"] == "9"
+    assert "SCOPE (RBI)" not in "\n".join(lines)
+    assert "chunk-a" not in "\n".join(lines), "the model is never shown an id to copy"
+
+
+def test_citation_by_evidence_number_is_filled_from_the_ledger(researcher_graph):
+    draft = researcher_graph._resolve_draft({
+        "route": "assign_to_entity",
+        "basis": "Redressal is due in 21 days [E2], and the customer may complain [ E1 ].",
+        "timeline": {"days": 21, "basis_citation_id": "E2"},
+        "citations": [
+            {"citation_id": "c1", "evidence_number": "E2", "chunk_id": "made-up-by-the-model",
+             "doc_title": "Wrong title", "quote_span": "redressed within 21 days"},
+            {"evidence_number": "[E1]", "quote_span": "aggrieved may file a complaint"},
+        ],
+    }, LEDGER)
+
+    first, second = draft["citations"]
+    assert first == {"citation_id": "c1", "doc_id": "doc-b", "doc_title": "Circular B",
+                     "circular_ref": "B/2", "clause": "2", "chunk_id": "chunk-b",
+                     "quote_span": "redressed within 21 days"}
+    assert (second["citation_id"], second["chunk_id"]) == ("c2", "chunk-a")
+    assert draft["basis"] == "Redressal is due in 21 days [c1], and the customer may complain [c2]."
+    assert draft["timeline"] == {"days": 21, "basis_citation_id": "c1"}
+
+
+def test_unknown_evidence_number_is_left_for_the_verifier_to_reject(researcher_graph):
+    draft = researcher_graph._resolve_draft(
+        {"citations": [{"evidence_number": "E9", "quote_span": "x"}], "basis": "Claim [E9]."},
+        LEDGER)
+    assert draft["citations"][0]["chunk_id"] == ""
+    assert set(draft["citations"][0]) == {"citation_id", "doc_id", "doc_title", "circular_ref",
+                                          "clause", "chunk_id", "quote_span"}
+
+
+@pytest.mark.parametrize("timeline", [
+    "30 days", {"days": "30", "basis_citation_id": "c1"}, {"days": 30},
+    {"days": 30, "basis_citation_id": "c7"}, {"days": True, "basis_citation_id": "c1"},
+])
+def test_malformed_timeline_is_dropped(researcher_graph, timeline):
+    draft = researcher_graph._resolve_draft({
+        "timeline": timeline,
+        "citations": [{"citation_id": "c1", "chunk_id": "chunk-b", "quote_span": "q"}],
+    }, LEDGER)
+    assert draft["timeline"] is None
+
+
+def test_malformed_citation_list_never_reaches_the_determination(researcher_graph):
+    assert researcher_graph._resolve_draft({"citations": "see above"}, LEDGER)["citations"] == []
+    assert researcher_graph._resolve_draft({"citations": ["c1", None]}, LEDGER)["citations"] == []
+    assert researcher_graph._resolve_draft(["not", "an", "object"], LEDGER) == {}
+
+
+def test_draft_prompt_v2_gets_numbered_evidence_and_the_run_completes(fake_retrieval, monkeypatch):
+    """With draft v2 the model cites E-numbers and never sees a chunk id."""
+    from services.worker.agent import researcher as researcher_module
+
+    monkeypatch.setattr(researcher_module, "_V_DRAFT", "v2")
+    prompts = {}
+
+    class NumberCitingLLM(FakeLLMClient):
+        def chat(self, messages, **kwargs):
+            if kwargs.get("step") == "draft":
+                prompts["draft"] = messages[0]["content"]
+                first = json.loads(prompts["draft"].split("[E1] ", 1)[1].splitlines()[0])
+                reply = {"route": "assign_to_entity", "regulator": "SEBI", "entity_type": "broker",
+                         "timeline": None, "basis": "Covered by the SCORES framework [E1].",
+                         "citations": [{"citation_id": "c1", "evidence_number": "E1",
+                                        "quote_span": first["text"][:60]}]}
+                return {"choices": [{"message": {"content": json.dumps(reply)}}],
+                        "usage": {}, "model": "fake", "degraded": False}
+            return super().chat(messages, **kwargs)
+
+    llm = NumberCitingLLM()
+    store = InMemoryRunStore()
+    run_id = str(uuid.uuid4())
+    result = run_complaint_pipeline(
+        run_id=run_id, complaint_data=BROKER_COMPLAINT, run_store=store,
+        researcher_graph=ResearcherGraph(llm_client=llm, retrieval_client=fake_retrieval),
+        verifier_graph=VerifierGraph(llm_client=llm, retrieval_client=fake_retrieval),
+    )
+
+    assert "{evidence_items}" not in prompts["draft"] and "[E1] {" in prompts["draft"]
+    jsonschema.validate(instance=result, schema=DETERMINATION_SCHEMA)
+    assert result["status"] == "completed" and result["verification"]["passed"] is True
+    assert len(result["citations"][0]["chunk_id"]) == 64
+    assert result["basis"] == "Covered by the SCORES framework [c1]."
+    assert result["prompt_versions"]["researcher_draft"] == "v2"
+
+
+def test_classify_prompt_asks_for_every_regulator_involved():
+    from prompts.loader import prompt_loader
+
+    prompt = prompt_loader.render("researcher_classify", "v3", complaint_text="x")
+    assert "regulators_involved" in prompt and "{complaint_text}" not in prompt
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ({"decision": "accept", "passed": True, "unsupported_claims": []}, (1, 1)),
+    ({"decision": "accept", "passed": True,
+      "claims": [{"claim": "a", "supported": True}, {"claim": "b", "supported": False},
+                 {"claim": "c", "supported": True}]}, (3, 2)),
+    ({"decision": "accept", "passed": True, "claims_checked": "many", "claims_supported": 9}, (1, 1)),
+])
+def test_claim_counts_are_consistent_whatever_the_verifier_model_returns(
+        fake_retrieval, reply, expected):
+    chunk_id = "d2d66258e59fc24f14530d30125912f54bd3c045f20e9a915253e947e682323e"
+    chunk = fake_retrieval.get_chunk(chunk_id)
+    draft = {"status": "completed", "route": "assign_to_entity", "regulator": "SEBI",
+             "basis": "Falls under SCORES [c1].", "timeline": None, "degraded": False,
+             "citations": [{"citation_id": "c1", "chunk_id": chunk_id,
+                            "quote_span": chunk["text"][:60]}]}
+
+    result = VerifierGraph(llm_client=FakeLLMClient(overrides={"verify": reply}),
+                           retrieval_client=fake_retrieval).verify(draft=draft, evidence_ledger=[chunk])
+
+    verification = result["draft"]["verification"]
+    assert (verification["claims_checked"], verification["claims_supported"]) == expected

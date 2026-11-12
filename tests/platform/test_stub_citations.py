@@ -72,3 +72,29 @@ def test_stub_keywords_match_whole_words_only():
 def test_stub_keywords_still_match_plurals_and_real_abbreviations():
     assert _classify("Both brokers ignored my complaint.")["entity_type"] == "broker"
     assert _classify("My RTA has not updated my name.".lower())["entity_type"] == "registrar"
+
+
+def test_stub_cites_numbered_evidence_items_by_number():
+    """Draft prompt v2: evidence is `[E1] {json}` lines and the reply names the number."""
+    items = "\n".join([
+        '[E1] ' + json.dumps({"framework": "SEBI", "clause": "2", "text": "Investor grievances."}),
+        '[E2] ' + json.dumps({"framework": "RBI", "clause": "9",
+                              "text": "Any customer aggrieved by deficiency in service may file."}),
+    ])
+    prompt = ("Evidence items:\n" + items +
+              "\n<complaint>\nMy bank fixed deposit interest is wrong.\n</complaint>")
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)], step="draft")
+
+    draft = json.loads(generate_stub_reply(request))
+
+    assert draft["regulator"] == "RBI"
+    citation = draft["citations"][0]
+    assert citation["evidence_number"] == "E2" and "chunk_id" not in citation
+    assert citation["quote_span"] in "Any customer aggrieved by deficiency in service may file."
+
+
+def test_stub_does_not_invent_a_citation_when_no_evidence_items_were_listed():
+    prompt = ("Evidence items:\n(no evidence was retrieved)\n"
+              "<complaint>\nMy bank fixed deposit is wrong.\n</complaint>")
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)], step="draft")
+    assert json.loads(generate_stub_reply(request))["citations"] == []

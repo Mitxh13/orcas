@@ -50,7 +50,7 @@ _MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "8"))
 _RUN_WALL_CLOCK_S = float(os.getenv("RUN_WALL_CLOCK_S", "45.0"))
 
 # Prompt versions from env (M13)
-_V_CLASSIFY = os.getenv("PROMPT_RESEARCHER_CLASSIFY", "v1")
+_V_CLASSIFY = os.getenv("PROMPT_RESEARCHER_CLASSIFY", "v3")
 _V_REFLECT = os.getenv("PROMPT_RESEARCHER_REFLECT", "v2")
 _V_DRAFT = os.getenv("PROMPT_RESEARCHER_DRAFT", "v1")
 
@@ -58,6 +58,10 @@ _V_DRAFT = os.getenv("PROMPT_RESEARCHER_DRAFT", "v1")
 RETRY_STRATEGIES = ("query_rewrite", "framework_swap", "clause_follow")
 _CROSS_REFERENCE = re.compile(
     r"\b(?:clause|paragraph|para|regulation|section)\s+(\d+[A-Z]?)\b", re.IGNORECASE)
+
+# Characters of each passage shown to the draft step as a numbered evidence item (M3).
+_EVIDENCE_ITEM_CHARS = int(os.getenv("DRAFT_EVIDENCE_CHARS", "1500"))
+_EVIDENCE_REF = re.compile(r"\[\s*(E\d+)\s*\]")
 
 ALLOWED_ENTITIES = {
     "broker", "mutual_fund", "registrar", "listed_company",
@@ -388,6 +392,7 @@ class ResearcherGraph:
             complaint_text=text,
             classification=json.dumps(classification),
             evidence_ledger=json.dumps(ledger),
+            evidence_items=self._evidence_items(ledger),
         )
         if state.get("retry_feedback"):
             prompt += (
@@ -404,7 +409,7 @@ class ResearcherGraph:
         )
         is_degraded = response.get("degraded", False) or state.get("degraded", False)
         content = response["choices"][0]["message"]["content"]
-        draft_json = self.llm.extract_json(content)
+        draft_json = self._resolve_draft(self.llm.extract_json(content), ledger)
 
         raw_entity = draft_json.get("entity_type", classification.get("entity_type", "unknown"))
         safe_entity = raw_entity if raw_entity in ALLOWED_ENTITIES else "other"
@@ -471,6 +476,89 @@ class ResearcherGraph:
             }
 
         return {"draft": determination, "status": determination["status"]}
+
+    # -----------------------------------------------------------------------
+    # Evidence numbering (M3): the model cites [E3]; code supplies the chunk
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _citable(ledger: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ledger passages a draft may cite, in E-number order. Scope cards are never citable."""
+        return [p for p in ledger if p.get("chunk_type", "clause") != "scope_card"]
+
+    def _evidence_items(self, ledger: List[Dict[str, Any]]) -> str:
+        """One numbered line per citable passage: ``[E1] {json}``."""
+        lines = []
+        for number, passage in enumerate(self._citable(ledger), start=1):
+            lines.append(f"[E{number}] " + json.dumps({
+                "framework": passage.get("framework"),
+                "doc_title": passage.get("doc_title", ""),
+                "clause": str(passage.get("clause_id") or passage.get("clause") or ""),
+                "text": passage.get("text", "")[:_EVIDENCE_ITEM_CHARS],
+            }, ensure_ascii=False))
+        return "\n".join(lines) or "(no evidence was retrieved)"
+
+    def _resolve_draft(self, draft_json: Dict[str, Any],
+                       ledger: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Make the model's draft safe to verify and store.
+
+        * A citation given by evidence number, or by a chunk id that is in the ledger, has its
+          chunk id, document, title, circular reference and clause filled from the ledger, so a
+          model never has to copy a 64-character id. One that matches nothing is left as it is
+          for the verifier to reject.
+        * ``[E3]`` markers in the basis become the matching citation ids.
+        * A malformed citation list or timeline is dropped rather than stored.
+        """
+        if not isinstance(draft_json, dict):
+            return {}
+        draft = dict(draft_json)
+        by_number = {f"E{n}": p for n, p in enumerate(self._citable(ledger), start=1)}
+        by_chunk = {p.get("chunk_id"): p for p in ledger}
+        citations, number_to_id = [], {}
+        raw = draft.get("citations")
+        for position, item in enumerate(raw if isinstance(raw, list) else [], start=1):
+            if not isinstance(item, dict):
+                continue
+            number = str(item.get("evidence_number") or item.get("evidence_id") or "").strip("[] ").upper()
+            passage = by_number.get(number) or by_chunk.get(item.get("chunk_id"))
+            citation = {
+                "citation_id": str(item.get("citation_id") or f"c{position}"),
+                "doc_id": str(item.get("doc_id") or ""),
+                "doc_title": str(item.get("doc_title") or ""),
+                "circular_ref": str(item.get("circular_ref") or ""),
+                "clause": str(item.get("clause") or ""),
+                "chunk_id": str(item.get("chunk_id") or ""),
+                "quote_span": str(item.get("quote_span") or ""),
+            }
+            if passage:
+                citation.update(
+                    doc_id=passage.get("doc_id", ""),
+                    doc_title=passage.get("doc_title", ""),
+                    circular_ref=passage.get("circular_ref", ""),
+                    clause=str(passage.get("clause_id") or passage.get("clause") or ""),
+                    chunk_id=passage.get("chunk_id", ""),
+                )
+            if number:
+                number_to_id.setdefault(number, citation["citation_id"])
+            citations.append(citation)
+        draft["citations"] = citations
+
+        if isinstance(draft.get("basis"), str) and number_to_id:
+            draft["basis"] = _EVIDENCE_REF.sub(
+                lambda m: f"[{number_to_id.get(m.group(1).upper(), m.group(1))}]", draft["basis"])
+
+        timeline = draft.get("timeline")
+        citation_ids = {c["citation_id"] for c in citations}
+        if isinstance(timeline, dict):
+            basis_id = str(timeline.get("basis_citation_id") or "").strip("[] ")
+            basis_id = number_to_id.get(basis_id.upper(), basis_id)
+            days = timeline.get("days")
+            valid = isinstance(days, int) and not isinstance(days, bool) and days >= 0
+            draft["timeline"] = ({"days": days, "basis_citation_id": basis_id}
+                                 if valid and basis_id in citation_ids else None)
+        else:
+            draft["timeline"] = None
+        return draft
 
     def node_escalate(self, state: AgentState) -> Dict[str, Any]:
         esc_info = state.get("escalation") or {

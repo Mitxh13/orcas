@@ -40,6 +40,15 @@ class LLMUnavailable(Exception):
         self.step = step
 
 
+def client_timeout_s() -> float:
+    """How long the worker waits for the gateway: the gateway's own total budget plus a margin,
+    so the gateway always answers (or gives up) first. ``LLM_CLIENT_TIMEOUT_S`` overrides it."""
+    explicit = os.getenv("LLM_CLIENT_TIMEOUT_S")
+    if explicit:
+        return float(explicit)
+    return float(os.getenv("LLM_TOTAL_BUDGET_SECONDS", "90")) + 10.0
+
+
 class LLMClient:
     """Client for calling the ORCAS LLM Gateway from worker agents."""
 
@@ -63,7 +72,7 @@ class LLMClient:
         agent: Optional[str] = None,
         step: Optional[str] = None,
         prompt_version: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Send a chat request to the LLM gateway.
@@ -74,6 +83,7 @@ class LLMClient:
             If the gateway is unreachable, returns non-200, or times out.
         """
         started = time.monotonic()
+        timeout = timeout if timeout is not None else client_timeout_s()
         effective_run_id = run_id or self.run_id
         payload = {
             "messages": messages,
