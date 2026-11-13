@@ -150,8 +150,8 @@ def test_quarantine_listing_requires_admin_token(monkeypatch):
 
 def test_rate_limit_rejects_before_run_creation():
     class Limited:
-        def retry_after(self, client_id):
-            assert client_id == "demo-client"
+        def retry_after(self, bucket):
+            assert bucket == "ip:testclient"
             return 3
 
     store = InMemoryRunStore()
@@ -163,6 +163,26 @@ def test_rate_limit_rejects_before_run_creation():
     assert store.runs == {}
     assert dispatcher.sent == []
     assert b'orcas_gateway_rate_limit_rejections_total' in client.get("/metrics").content
+
+
+def test_invalid_request_burst_is_limited_before_quarantine():
+    class Limited:
+        def __init__(self):
+            self.calls = 0
+
+        def retry_after(self, bucket):
+            if bucket == "ip:testclient":
+                self.calls += 1
+                return 1 if self.calls > 60 else 0
+            assert bucket == "invalid:testclient"
+            return 0
+
+    store = InMemoryRunStore()
+    client = TestClient(create_app(store=store, dispatcher=RecordingDispatcher(), limiter=Limited()))
+    responses = [client.post("/v1/complaints", content=b"{", headers={"Content-Type": "application/json"})
+                 for _ in range(100)]
+    assert [response.status_code for response in responses] == [422] * 60 + [429] * 40
+    assert len(store.quarantined) == 60
 
 
 def test_completed_cache_hit_creates_terminal_run_without_dispatch():
@@ -200,3 +220,52 @@ def test_cache_can_be_bypassed_for_evaluation():
                            headers={"X-Run-Cache-Bypass": "true"})
     assert response.status_code == 202
     assert dispatcher.sent == [response.json()["run_id"]]
+
+
+def test_source_ip_bucket_is_wider_than_the_per_client_bucket(monkeypatch):
+    """Behind Compose every host-side client shares one IP; it must not share one 60/min bucket."""
+    import services.gateway.app as gateway_app
+
+    built = []
+
+    class Limiter:
+        def __init__(self, url, per_minute):
+            self.per_minute, self.buckets = per_minute, []
+            built.append(self)
+
+        def retry_after(self, bucket):
+            self.buckets.append(bucket)
+            return 0
+
+    monkeypatch.setenv("REDIS_URL", "redis://unused:6379/0")
+    monkeypatch.delenv("RETRIEVAL_SERVICE_URL", raising=False)
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "60")
+    monkeypatch.delenv("RATE_LIMIT_IP_PER_MIN", raising=False)
+    monkeypatch.setattr(gateway_app, "RedisRateLimiter", Limiter)
+
+    client = TestClient(create_app(store=InMemoryRunStore(), dispatcher=RecordingDispatcher()))
+    assert client.post("/v1/complaints", json=valid_payload()).status_code == 202
+    assert client.post("/v1/complaints", content=b"{",
+                       headers={"Content-Type": "application/json"}).status_code == 422
+
+    per_client, per_ip = built
+    assert (per_client.per_minute, per_ip.per_minute) == (60, 600)
+    assert per_ip.buckets == ["ip:testclient", "ip:testclient"]
+    assert per_client.buckets == [f"client:testclient:{valid_payload()['client_id']}",
+                                  "invalid:testclient"]
+
+
+def test_source_ip_bucket_is_never_narrower_than_the_per_client_bucket(monkeypatch):
+    import services.gateway.app as gateway_app
+
+    capacities = []
+    monkeypatch.setenv("REDIS_URL", "redis://unused:6379/0")
+    monkeypatch.delenv("RETRIEVAL_SERVICE_URL", raising=False)
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "100000")
+    monkeypatch.setenv("RATE_LIMIT_IP_PER_MIN", "600")
+    monkeypatch.setattr(gateway_app, "RedisRateLimiter",
+                        lambda url, per_minute: capacities.append(per_minute))
+
+    create_app(store=InMemoryRunStore(), dispatcher=RecordingDispatcher())
+
+    assert capacities == [100000, 100000]

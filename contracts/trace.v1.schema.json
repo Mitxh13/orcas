@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcas.pesu.edu/contracts/trace.v1.schema.json",
+  "title": "OrcasRunTrace",
+  "type": "object",
+  "required": ["run_id", "status", "events", "total_cost_usd"],
+  "properties": {
+    "run_id": {"type": "string", "format": "uuid"},
+    "status": {"enum": ["queued", "running", "completed", "escalated", "failed"]},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["run_id", "seq", "ts", "agent", "step", "kind", "latency_ms", "payload", "tokens", "cost_usd"],
+        "properties": {
+          "run_id": {"type": "string", "format": "uuid"},
+          "seq": {"type": "integer", "minimum": 1},
+          "ts": {"type": "string", "format": "date-time"},
+          "agent": {"type": "string"},
+          "step": {"type": "string"},
+          "kind": {"type": "string"},
+          "latency_ms": {"type": "integer", "minimum": 0},
+          "payload": {"type": "object"},
+          "tokens": {"type": "object"},
+          "cost_usd": {"type": "number", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "total_cost_usd": {"type": "number", "minimum": 0}
+  },
+  "additionalProperties": false
+}

@@ -213,7 +213,7 @@ flowchart LR
 
 Clause-aligned trades a marginal raw-recall dip for sharper ranking and citable provisions.
 
-### 5.2 Agent evaluation — stub mode
+### 5.2 Agent evaluation — stub mode (25 synthetic scenarios, 2026-11-12)
 
 The agent (`eval/agent_sut.py`) with stub replies. Deterministic embedding (NLI-substitute) judge; thresholds: support 0.45, relevance 0.32, infer 0.40. 7 scenarios held out from tuning.
 
@@ -253,7 +253,9 @@ The stub's narrow parsing caused many premature escalations in the first benchma
 At ten concurrent clients, p95 submit-to-terminal latency ≤ **90 seconds** and ≥ **99%** of accepted runs reach `completed` or `escalated`.  
 Workload: 1.5-second LLM stub, one worker container, two Celery processes, 100+ complete complaints after warmup.
 
+
 ### 6.2 Measured results
+
 
 | Workload | Workers | Clients | Observations | p50 | p95 | Throughput | Failures |
 |---|---:|---:|---:|---:|---:|---:|---:|

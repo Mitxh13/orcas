@@ -19,7 +19,8 @@ TERMINAL = frozenset({"completed", "escalated", "failed"})
 class RunStore(Protocol):
     def create_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]: ...
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
-    def claim_run(self, run_id: str) -> bool: ...
+    def claim_run(self, run_id: str, redelivered: bool = False) -> bool: ...
+    def stale_running_runs(self, max_age_s: int) -> list[str]: ...
     def update_status(self, run_id: str, status: str) -> None: ...
     def complete(self, run_id: str, determination: dict[str, Any]) -> None: ...
     def fail(self, run_id: str, error_message: str) -> None: ...
@@ -81,14 +82,23 @@ class InMemoryRunStore:
             if status == "running" and record["started_at"] is None:
                 record["started_at"] = _now()
 
-    def claim_run(self, run_id: str) -> bool:
+    def claim_run(self, run_id: str, redelivered: bool = False) -> bool:
         with self._lock:
             record = self.runs[run_id]
-            if record["status"] != "queued":
+            if record["status"] != "queued" and not (redelivered and record["status"] == "running"):
                 return False
             record["status"] = "running"
             record["started_at"] = _now()
             return True
+
+    def stale_running_runs(self, max_age_s: int) -> list[str]:
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_s)
+        with self._lock:
+            return [run_id for run_id, record in self.runs.items()
+                    if record["status"] == "running" and record["started_at"]
+                    and datetime.fromisoformat(record["started_at"]) < cutoff]
 
     def complete(self, run_id: str, determination: dict[str, Any]) -> None:
         status = determination.get("status", "completed")
@@ -222,15 +232,23 @@ class PostgresRunStore:
                 (status, status, run_id),
             )
 
-    def claim_run(self, run_id: str) -> bool:
+    def claim_run(self, run_id: str, redelivered: bool = False) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 "UPDATE runs SET status = 'running', started_at = NOW() WHERE run_id = %s "
-                "AND (status = 'queued' OR (status = 'running' "
-                "AND (started_at IS NULL OR started_at < NOW() - INTERVAL '120 seconds'))) "
-                "RETURNING run_id", (run_id,),
+                "AND (status = 'queued' OR (status = 'running' AND %s)) "
+                "RETURNING run_id", (run_id, redelivered),
             ).fetchone()
         return row is not None
+
+    def stale_running_runs(self, max_age_s: int) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT run_id::text FROM runs WHERE status = 'running' "
+                "AND started_at < NOW() - make_interval(secs => %s)",
+                (max_age_s,),
+            ).fetchall()
+        return [row["run_id"] for row in rows]
 
     def complete(self, run_id: str, determination: dict[str, Any]) -> None:
         from psycopg.types.json import Jsonb

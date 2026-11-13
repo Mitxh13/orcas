@@ -161,10 +161,13 @@ unchanged: `refer_to_other_regulator`, `RBI`, `bank`, no escalation.
 
 ### Status of the running system (stub mode)
 
-Routes to RBI correctly but cites **clause 10** with a quote that starts mid-word (`"mplaint (1) N o
-complaint for deficiency in service shall lie…"`), and never reaches SEBI first because
-classification already says RBI. Fixes are Mitesh's M3/M4/M5; `test_reference_case.py` holds the
-citation check as an expected failure until they land.
+As of 2026-11-12 the run starts in the SEBI framework (the complainant names SEBI), swaps to RBI
+after reflection, routes to RBI and cites the **preamble** with a quote that resolves in the
+retrieved text. `test_reference_case.py` checks this without an expected-failure marker. Two limits
+remain: clause 9 is not among the top five passages the agent's query returns, so it is never
+cited; and the preference for the deciding clause lives in the stub's citation chooser, so a live
+model has to be checked separately. Earlier builds cited clause 10 with a quote that started
+mid-word.
 
 ### Demo #10 narration
 

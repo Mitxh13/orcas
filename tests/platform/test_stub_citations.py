@@ -27,3 +27,74 @@ def test_stub_draft_does_not_invent_a_citation_when_retrieval_is_empty():
     )
     draft = json.loads(generate_stub_reply(request))
     assert draft["citations"] == []
+
+
+def _draft(ledger, complaint="My bank fixed deposit interest is wrong."):
+    prompt = f"Complaint: {complaint}\nEvidence Ledger: " + json.dumps(ledger)
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)], step="draft")
+    return json.loads(generate_stub_reply(request))
+
+
+def _classify(complaint):
+    request = ChatRequest(messages=[ChatMessage(role="user", content=f"Complaint: {complaint}")],
+                          step="classify")
+    return json.loads(generate_stub_reply(request))
+
+
+def test_stub_draft_prefers_the_clause_that_decides_jurisdiction():
+    ledger = [
+        {"chunk_id": "c8", "framework": "RBI", "clause_id": "8",
+         "text": "8. Powers and Functions: complaints relating to deficiency in service."},
+        {"chunk_id": "c10", "framework": "RBI", "clause_id": "10",
+         "text": "10. Grounds for non-maintainability of a Complaint: deficiency in service."},
+        {"chunk_id": "c9", "framework": "RBI", "clause_id": "9",
+         "text": "9. Any customer aggrieved by deficiency in service may file a complaint."},
+    ]
+    assert _draft(ledger)["citations"][0]["clause"] == "9"
+
+
+def test_stub_draft_cites_non_maintainability_only_when_nothing_else_was_retrieved():
+    clause_10 = {"chunk_id": "c10", "framework": "RBI", "clause_id": "10",
+                 "text": "10. Grounds for non-maintainability: deficiency in service claims."}
+    clause_8 = {"chunk_id": "c8", "framework": "RBI", "clause_id": "8",
+                "text": "8. Powers and Functions of the Ombudsman."}
+    assert _draft([clause_10, clause_8])["citations"][0]["clause"] == "8"
+    assert _draft([clause_10])["citations"][0]["clause"] == "10"
+
+
+def test_stub_keywords_match_whole_words_only():
+    # "rta" in "important", "nav" in "unavailable", "atm" in "treatment", "dp" in "feedpost"
+    plain = _classify("It is important that the unavailable statement gets fair treatment by my broker.")
+    assert (plain["entity_type"], plain["regulator"]) == ("broker", "SEBI")
+    assert not plain.get("regulators_involved")
+
+
+def test_stub_keywords_still_match_plurals_and_real_abbreviations():
+    assert _classify("Both brokers ignored my complaint.")["entity_type"] == "broker"
+    assert _classify("My RTA has not updated my name.".lower())["entity_type"] == "registrar"
+
+
+def test_stub_cites_numbered_evidence_items_by_number():
+    """Draft prompt v2: evidence is `[E1] {json}` lines and the reply names the number."""
+    items = "\n".join([
+        '[E1] ' + json.dumps({"framework": "SEBI", "clause": "2", "text": "Investor grievances."}),
+        '[E2] ' + json.dumps({"framework": "RBI", "clause": "9",
+                              "text": "Any customer aggrieved by deficiency in service may file."}),
+    ])
+    prompt = ("Evidence items:\n" + items +
+              "\n<complaint>\nMy bank fixed deposit interest is wrong.\n</complaint>")
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)], step="draft")
+
+    draft = json.loads(generate_stub_reply(request))
+
+    assert draft["regulator"] == "RBI"
+    citation = draft["citations"][0]
+    assert citation["evidence_number"] == "E2" and "chunk_id" not in citation
+    assert citation["quote_span"] in "Any customer aggrieved by deficiency in service may file."
+
+
+def test_stub_does_not_invent_a_citation_when_no_evidence_items_were_listed():
+    prompt = ("Evidence items:\n(no evidence was retrieved)\n"
+              "<complaint>\nMy bank fixed deposit is wrong.\n</complaint>")
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)], step="draft")
+    assert json.loads(generate_stub_reply(request))["citations"] == []

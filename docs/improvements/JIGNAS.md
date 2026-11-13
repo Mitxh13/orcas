@@ -1,7 +1,7 @@
 # Jignas: improvements before the demo
 
 **Your area:** `docker-compose.yml`, `Makefile`, `.env.example`, `.github/`, `contracts/` (editor), `libs/orcas_common/`, `services/gateway/`, `services/metrics_exporter/`, `observability/`, `loadtest/`, `scripts/`
-**Your docs:** `README.md`, `docs/ARCHITECTURE.md` (§2, §7, §8, §11), `docs/slo.md`, `docs/runbook.md`, `docs/incident_log.md`, `docs/data_contract.md`, `docs/initial_demo.md`
+**Your docs:** `README.md`, `docs/ARCHITECTURE.md` (§2, §7, §8, §11), `docs/slo.md`, `docs/runbook.md`, `docs/incident_log.md`, `docs/data_contract.md`, `docs/DEMO.md`
 **Source:** integration audit of commit `e6a9806` (2026-11-03). Every item links to the evidence so you can check it yourself.
 **Deadline:** the demo is in 5 days. Features freeze at the end of Day 4. Day 5 is rehearsal and bug fixes only.
 
@@ -62,7 +62,7 @@ The platform work holds up: intake and quarantine, the queue, tracing, provision
 
 **Problem.** Every Compose run in the docs happened on GitHub Actions Linux runners; Docker wasn't available on the developers' machines. The demo runs on a laptop. cAdvisor's host mounts (`/var/lib/docker`, `/sys`, `/`) are Linux paths and may behave differently under Docker Desktop.
 
-**Evidence:** [notes_jignas.md](../work/notes_jignas.md), [docker-compose.yml:245-256](../../docker-compose.yml#L245-L256)
+**Evidence:** [notes_jignas.md](../work/jignas/notes_jignas.md), [docker-compose.yml:245-256](../../docker-compose.yml#L245-L256)
 
 **What to do**
 - [ ] On the demo laptop: fresh clone → `cp .env.example .env` → `docker compose up --build -d`. Time the first start and note the RAM and disk needed. Set Docker Desktop memory to at least 8 GB.

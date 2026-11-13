@@ -1,0 +1,23 @@
+{
+  "worker": {
+    "run_id": "5e962fda-40b3-40f2-bbf4-d00fd6a3a4d5",
+    "status_while_stopped": "queued",
+    "status_after_restart": "completed"
+  },
+  "worker_midrun": {
+    "run_id": "d49439ac-a0e4-4c17-b4e0-c1f791eadd93",
+    "status_when_killed": "running",
+    "status_after_restart": "escalated"
+  },
+  "redis": {
+    "outage_http_status": 503,
+    "recovery_run_id": "c2eedc58-6a98-43ae-81d6-dec342eb8b5f",
+    "recovery_status": "completed"
+  },
+  "retrieval": {
+    "outage_run_id": "f532497c-40a5-4dbc-8970-d098e73b05cb",
+    "outage_status": "escalated",
+    "recovery_run_id": "c528f5b3-6c4e-4f13-a298-2408bb306514",
+    "recovery_status": "completed"
+  }
+}

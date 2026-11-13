@@ -31,8 +31,10 @@
       "format": "date-time"
     },
     "result": {
-      "type": ["object", "null"],
-      "$ref": "determination.v1.schema.json"
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "determination.v1.schema.json"}
+      ]
     }
   },
   "additionalProperties": false

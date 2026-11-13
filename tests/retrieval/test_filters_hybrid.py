@@ -42,3 +42,42 @@ def test_product_filter(retriever):
     resp = retriever.search(SearchRequest(
         query="deposit interest", k=8, filters=SearchFilters(product_type="fixed_deposit")))
     assert all("fixed_deposit" in p.product_types for p in resp.results)
+
+
+@pytest.mark.parametrize("framework", ["SEBI", "RBI"])
+def test_hybrid_respects_the_framework_filter(retriever, framework):
+    """Lexical hits used to be fused in unfiltered, so the other framework leaked through."""
+    resp = retriever.search(SearchRequest(
+        query="ombudsman complaint deficiency in service mutual fund redemption", k=20,
+        mode=SearchMode.hybrid, filters=SearchFilters(framework=framework)))
+    assert resp.results
+    assert {p.framework for p in resp.results} == {framework}
+
+
+def test_hybrid_respects_the_chunk_type_filter(retriever):
+    resp = retriever.search(SearchRequest(
+        query="scheme covers regulated entities", k=20, mode=SearchMode.hybrid,
+        filters=SearchFilters(chunk_type="scope_card")))
+    assert resp.results and all(p.chunk_type == "scope_card" for p in resp.results)
+
+
+def test_lexical_index_is_rebuilt_when_the_index_version_changes():
+    class Collection:
+        def __init__(self):
+            self.docs = {"a": "demat account frozen", "c": "share transfer pending",
+                         "d": "dividend not received"}
+
+        def get(self, where=None, include=None, ids=None):
+            return {"ids": list(self.docs), "documents": list(self.docs.values())}
+
+    collection = Collection()
+    retriever = Retriever(collection=collection, use_cache=False)
+    version = ["v1"]
+    retriever.index_version = lambda: version[0]
+
+    assert retriever._bm25_ids("mutual fund redemption", None, 5) == []
+
+    collection.docs["b"] = "mutual fund redemption delayed"
+    assert retriever._bm25_ids("mutual fund redemption", None, 5) == [], "same version: cached"
+    version[0] = "v2"
+    assert retriever._bm25_ids("mutual fund redemption", None, 5) == ["b"]

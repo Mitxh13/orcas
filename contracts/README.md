@@ -12,6 +12,8 @@ These contracts are **FROZEN** as of Day 3. Any modifications require an Archite
 | [`complaint.v1.schema.json`](complaint.v1.schema.json) | Request payload validated at ingestion boundary | Gateway $\rightarrow$ Client |
 | [`determination.v1.schema.json`](determination.v1.schema.json) | Terminal complaint routing determination | Worker $\rightarrow$ Gateway / Eval |
 | [`run_status.v1.schema.json`](run_status.v1.schema.json) | Polling response containing status and result | Gateway $\rightarrow$ Client |
+| [`trace.v1.schema.json`](trace.v1.schema.json) | Ordered run events and recorded cost | Gateway $\rightarrow$ Client |
+| [`feedback.v1.schema.json`](feedback.v1.schema.json) | Feedback request and persisted response | Client $\leftrightarrow$ Gateway |
 | [`llm_gateway.openapi.yaml`](llm_gateway.openapi.yaml) | LLM chat completion API with usage & cost tracking | LLM Gateway $\rightarrow$ Worker |
 | [`retrieval.openapi.yaml`](retrieval.openapi.yaml) | Search, chunk, and clause retrieval API | Retrieval $\rightarrow$ Worker |
 

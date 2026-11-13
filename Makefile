@@ -1,5 +1,4 @@
-# ORCAS — convenience targets (Tahir's eval/retrieval). Jignas owns the full stack targets
-# (compose up, loadtest); this Makefile currently covers what Tahir's slices provide.
+# ORCAS development, evaluation, and full-stack targets.
 .PHONY: ingest eval eval-live eval-baseline experiment test demo up down doctor loadtest
 
 up:

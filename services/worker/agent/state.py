@@ -34,7 +34,6 @@ class AgentState(TypedDict, total=False):
     current_framework: str
     pending_tool_call: Optional[Dict[str, Any]]
     reflection: Optional[Dict[str, Any]]
-    strategy_idx: int
     budget: Budget
     draft: Optional[Dict[str, Any]]
     verification_outcome: Optional[Dict[str, Any]]
@@ -43,3 +42,5 @@ class AgentState(TypedDict, total=False):
     escalation: Optional[Dict[str, Any]]
     prompt_versions: Dict[str, str]
     degraded: bool
+    last_search_new_chunks: int
+    retry_feedback: Optional[str]

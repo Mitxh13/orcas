@@ -4,7 +4,7 @@
 # The embedding model is baked in at build time, so the container never downloads
 # it at runtime (L1 / startup latency). The Chroma index is NOT baked in — it is
 # read from the /data volume that the ingest one-shot writes.
-FROM python:3.11-slim
+FROM python:3.11.18-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -24,7 +24,9 @@ COPY services/retrieval/requirements.txt /app/requirements.txt
 RUN pip install -r requirements.txt
 
 # Bake the embedding model into the image (no runtime download).
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ARG EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+ENV EMBED_MODEL=${EMBED_MODEL}
+RUN python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['EMBED_MODEL'])"
 
 COPY services/ ./services/
 COPY libs/ ./libs/

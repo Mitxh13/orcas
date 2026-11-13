@@ -1,15 +1,15 @@
-chromadb>=0.5,<0.6
-sentence-transformers>=2.7,<4
-rank-bm25>=0.2.2
-langchain-core>=0.3,<2  # retrieval orchestration (L1): BaseRetriever + Embeddings
-fastapi>=0.110,<1
-uvicorn[standard]>=0.29,<1
-pydantic>=2.6,<3
-prometheus-client>=0.20
-redis>=5
-opentelemetry-sdk>=1.29,<2
-opentelemetry-exporter-otlp-proto-http>=1.29,<2
-opentelemetry-instrumentation-fastapi>=0.50b0,<1
-opentelemetry-instrumentation-httpx>=0.50b0,<1
+chromadb==0.5.23
+sentence-transformers==3.4.1
+rank-bm25==0.2.2
+langchain-core==1.7.0  # retrieval orchestration (L1): BaseRetriever + Embeddings
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+prometheus-client==0.26.0
+redis==6.4.0
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation-httpx==0.66b1
 # live scorer (eval/live_scorer.py) runs from this image: it needs the same embedding model
-psycopg[binary]>=3.2,<4
+psycopg[binary]==3.3.6

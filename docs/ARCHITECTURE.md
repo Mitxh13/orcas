@@ -35,6 +35,7 @@ flowchart LR
     W -->|"search / clause / chunk"| RS["retrieval<br/>FastAPI + Chroma"]
     W -->|"chat"| LG["llm-gateway<br/>breaker, backoff, cost"]
     LG -->|"profile: live"| PROV["Free-tier LLM provider"]
+    LG -->|"profile: ollama"| OLL["ollama<br/>local model volume"]
     LG -->|"stub mode"| STUB["llm-stub<br/>fixed reply + delay"]
     LG --> Q
 
@@ -47,6 +48,7 @@ flowchart LR
         P["prometheus"] --> G["grafana"]
         CA["cadvisor"] --> P
         WM["worker-metrics"] --> P
+        LS["live-scorer"] --> PG
     end
     GW -.-> OT
     W -.-> OT
@@ -74,7 +76,10 @@ A deployment boundary is the unit that is built, scaled, restarted and released 
 | **web** | *Independent release.* Static client; no business logic. |
 | **redis / postgres** | *State separation.* Redis = ephemeral (queue, cache, rate limit, breaker). Postgres = durable (runs, events, quarantine, feedback). |
 | **worker-metrics** | *Read-only metrics adapter.* Queries persisted events and queue depth for run KPIs without embedding an HTTP server in every Celery process. |
-| **prometheus / grafana / otel-collector / jaeger / cadvisor** | *Observability plane*, separate from the data plane so monitoring survives application failure. |
+| **worker-scheduler** | *Recovery timer.* Dispatches a stale-run sweep every minute. |
+| **live-scorer** | *Quality sampling.* Scores completed runs from Postgres and records sampled metrics. |
+| **ollama** | *Optional local model.* Enabled with the `ollama` Compose profile and backed by a model volume. |
+| **prometheus / grafana / otel-collector / jaeger / cadvisor** | *Observability plane*, separate from the data plane so monitoring survives application failure. cAdvisor uses the optional `resources` profile. |
 
 The gateway validates before creating a run or queue message. Redis uses
 separate databases for cache/rate limit, Celery broker, and Celery results.
@@ -128,7 +133,9 @@ Polling vs callback: polling is chosen as the default because the caller is a si
 
 ## 4. Agent topology (worker)
 
-Two agents with distinct responsibilities and a defined hand-off. They are separate LangGraph graphs with separate prompts, tool permissions and state schemas; the Verifier cannot call search tools that mutate the Researcher's evidence.
+Two agents with distinct responsibilities and a defined hand-off. The Researcher is a LangGraph state graph. The Verifier is a separate class with its own prompt and a read-only retrieval client that exposes only chunk lookup, so it cannot search or change the Researcher's evidence. Both run in the worker process and share one LLM client.
+
+In the current build the Researcher's plan step always issues `search_corpus`, with the query and framework chosen by the reflect step. `get_clause` is used by the cross-reference retry strategy (§4.2). `get_complaint_fields` and `list_framework_scope` are implemented and permitted but no step selects them.
 
 | Agent | Responsibility | Tools it may call |
 |---|---|---|
@@ -161,6 +168,7 @@ stateDiagram-v2
 Researcher → Verifier payload: `{complaint_fields, evidence_ledger[{chunk_id, text, query, tool, step}], draft_determination, claims[{text, citation_ids}]}`. Verifier → Researcher: `{decision, failed_claims, suggested_strategy}`.
 
 ### 4.2 Retry strategies (rotated, never repeated)
+On a `retry` decision the worker returns the draft to the Researcher, which keeps the run's ledger, queries and budget, runs one strategy, and writes a new draft with the Verifier's reason attached. The Verifier's `suggested_strategy` is tried first; a strategy with nothing new to fetch falls through to the next. With the default `MAX_VERIFY_RETRIES=2` a run gets one retry.
 1. **Query rewrite from what was read**: build a new query from terms in retrieved passages (e.g., the product or entity class named in a scope clause).
 2. **Framework swap**: search the *other* regulator's corpus using the product/entity extracted (this is the step that fixes the §4.1 bank-FD case).
 3. **Cross-reference follow**: fetch clauses referenced by id from retrieved passages via `get_clause`.
@@ -168,11 +176,11 @@ Researcher → Verifier payload: `{complaint_fields, evidence_ledger[{chunk_id, 
 ### 4.3 Failure behaviour
 | Failure | Behaviour |
 |---|---|
-| Researcher crashes / times out mid-run | Run ends `escalated` with `reason_code=agent_failure`, partial evidence attached, `degraded=true`. Celery retry only if the failure was before the first LLM call (idempotent restart). |
+| Researcher fails mid-run (LLM unavailable, retrieval error, soft time limit, any other exception) | Run ends `escalated` at once with `reason_code=agent_failure` and `degraded=true`; citations of a draft already written are kept as partial findings. The task is not retried. |
 | Verifier unavailable or times out | **Never return unverified.** Escalate with `reason_code=verification_unavailable`. |
 | Loop budget exhausted (steps / tool calls / wall clock) | Escalate with `reason_code=budget_exhausted`. |
 | LLM provider circuit open | Fallback chain (below); if none usable, escalate or honest error, never a stack trace. |
-| Worker killed | Celery `acks_late` redelivers; run-store keys make the restart idempotent; run events show the duplicate attempt. |
+| Worker killed | Celery `acks_late` redelivers after the visibility timeout (hard limit + 60 s) and run-store keys make the restart idempotent. The stale-run sweep closes a run still `running` at that age as `agent_failure`, so in practice a run killed mid-flight usually ends escalated. |
 
 ### 4.4 Escalation triggers (F7)
 Complaint spans two regulators · entity type outside corpus (e.g., insurer, pension fund, exchange not covered) · classification confidence below threshold · verification fails after retries · budget exhausted · guardrail flags · degraded dependency.
@@ -218,8 +226,7 @@ flowchart TD
     CB -->|"open"| FB
     CB2 --> FB["fallback chain"]
     FB --> P2["secondary model/provider"]
-    FB --> CACHE["cached response<br/>if identical prompt hash"]
-    FB --> ERR["honest error: degraded=true<br/>worker escalates"]
+    FB --> ERR["honest error: HTTP 503<br/>worker escalates, degraded=true"]
     P1 -->|"ok"| ACC["token + cost accounting<br/>per step"]
     P2 --> ACC
     ACC --> OUT["response + usage + cost"]
@@ -227,12 +234,14 @@ flowchart TD
 
 Every degraded or retried path sets flags that surface in the result (`degraded`) and in metrics. No path returns a confident answer from an incomplete run.
 
+All attempts, backoff waits and the fallback call share one budget per request (`LLM_TOTAL_BUDGET_SECONDS`); the worker waits that budget plus a margin. A provider `429` is retried after its `Retry-After`, and when that wait does not fit the budget the gateway returns `503` with the same header. There is no response cache in the gateway; repeated complaints are served by the run cache (§7).
+
 ## 7. Data stores
 
 | Store | Content | Notes |
 |---|---|---|
-| Postgres `runs` | run_id, client_id, status, payload hash, result JSON, prompt versions, index_version, timestamps | Source of truth for the API |
-| Postgres `run_events` | run_id, seq, ts, agent, step, kind (llm_call/tool_call/verify/…), query, passages, latency, tokens, cost | Enables the "reconstruct from run_id" requirement |
+| Postgres `runs` | run_id, status, payload JSON, submitted_at, started_at, finished_at, result JSON, error | Source of truth for the API; client ID, prompt versions and index version live inside JSON fields |
+| Postgres `run_events` | run_id, seq, ts, agent, step, kind, latency_ms, payload JSON, tokens JSON, cost_usd | Enables the "reconstruct from run_id" requirement |
 | Postgres `quarantine` | raw record, field-level errors, reason, ts | Rejected input; *no run row exists* |
 | Postgres `feedback` | run_id, rating, reason, ts | L6 |
 | Postgres `eval_scores` | sampled live runs and their metric scores | L6 chart |
@@ -241,10 +250,10 @@ Every degraded or retried path sets flags that surface in the result (`degraded`
 
 ## 8. Observability
 
-- **Logs**: JSON, fields `ts, level, service, correlation_id, run_id, agent, step, event, latency_ms`.
-- **Correlation ID**: created at gateway (or accepted from `X-Correlation-ID`), propagated via HTTP header, Celery headers and OTel baggage; equals the `run_id` for run-level work.
+- **Logs**: JSON fields `timestamp`, `level`, `logger`, `message`, and `correlation_id`; an `exception` field is added for logged errors. Agent, step, latency and cost live in persisted run events.
+- **Correlation ID**: created at gateway (or accepted from `X-Correlation-ID`), propagated via HTTP and Celery headers; equals the `run_id` for run-level work.
 - **Tracing**: OpenTelemetry SDK in all four Python services → collector → Jaeger. One trace per run; spans per agent step, tool call and LLM call.
-- **Metrics (Prometheus, `orcas_` prefix)**: request rate/latency histograms, run end-to-end latency, per-step latency, runs by outcome, steps and tool calls per run, retry count, breaker state, LLM tokens and cost by step, cache hit ratio, queue depth, ingest throughput, index freshness, chunk count.
+- **Metrics (Prometheus, `orcas_` prefix)**: request rate/latency histograms, run end-to-end latency, per-agent steps, tool calls, success ratio and step latency, retry rate, escalation reasons, degraded runs, breaker state, LLM tokens and cost by step, cache hit ratio, queue depth, index freshness and chunk count.
 - **Dashboards (Grafana)**: p50/p95 latency, error rate, throughput, availability, container CPU/memory (cAdvisor), agent KPIs (A6), cost panel (L5), quality over time (L6), index freshness.
 - **Reconstruction**: `GET /v1/runs/{id}/trace` returns the ordered `run_events` including every query, passage, prompt version, per-step latency and cost, and the verification outcome.
 
@@ -252,7 +261,7 @@ Every degraded or retried path sets flags that surface in the result (`degraded`
 
 | Layer | Control | Owner |
 |---|---|---|
-| Ingestion | Prompt-injection heuristics + classifier on every free-text field; toxicity check; length and character limits; rejects go to quarantine | Jignas |
+| Ingestion | Prompt-injection patterns on every free-text field, explicit-threat rejection, abusive-language detection without rejection, length and character limits; rejects go to quarantine | Jignas |
 | Prompting | Untrusted text delimited and labelled as data; tools never receive raw complaint text as instructions; tool args validated | Mitesh |
 | Tools | Read-only tools only; no tool can change a determination or write outside the run | Mitesh |
 | Output | Output filter: allowed `route` enum only, `disposed=false` enforced, forbidden phrases ("approved", "resolved", "compensation granted") blocked; toxicity check on output | Mitesh |

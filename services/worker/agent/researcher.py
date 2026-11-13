@@ -28,6 +28,7 @@ Changes vs previous version
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -49,9 +50,18 @@ _MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "8"))
 _RUN_WALL_CLOCK_S = float(os.getenv("RUN_WALL_CLOCK_S", "45.0"))
 
 # Prompt versions from env (M13)
-_V_CLASSIFY = os.getenv("PROMPT_RESEARCHER_CLASSIFY", "v1")
+_V_CLASSIFY = os.getenv("PROMPT_RESEARCHER_CLASSIFY", "v3")
 _V_REFLECT = os.getenv("PROMPT_RESEARCHER_REFLECT", "v2")
 _V_DRAFT = os.getenv("PROMPT_RESEARCHER_DRAFT", "v1")
+
+# Verifier retry strategies, in rotation order (ARCHITECTURE §4.2). One is never repeated in a run.
+RETRY_STRATEGIES = ("query_rewrite", "framework_swap", "clause_follow")
+_CROSS_REFERENCE = re.compile(
+    r"\b(?:clause|paragraph|para|regulation|section)\s+(\d+[A-Z]?)\b", re.IGNORECASE)
+
+# Characters of each passage shown to the draft step as a numbered evidence item (M3).
+_EVIDENCE_ITEM_CHARS = int(os.getenv("DRAFT_EVIDENCE_CHARS", "1500"))
+_EVIDENCE_REF = re.compile(r"\[\s*(E\d+)\s*\]")
 
 ALLOWED_ENTITIES = {
     "broker", "mutual_fund", "registrar", "listed_company",
@@ -181,7 +191,7 @@ class ResearcherGraph:
             "classification": classification,
             "current_framework": start_framework,
             "degraded": is_degraded,
-            "prompt_versions": {_V_CLASSIFY: "researcher_classify"},
+            "prompt_versions": {"researcher_classify": _V_CLASSIFY},
         }
 
     def node_plan(self, state: AgentState) -> Dict[str, Any]:
@@ -270,7 +280,7 @@ class ResearcherGraph:
         args = tool_call.get("args", {})
 
         executor = AgentToolExecutor(self.retrieval, state.get("complaint_fields", {}))
-        passages = executor.execute(tool_name, args)
+        passages = self._as_passages(executor.execute(tool_name, args))
 
         ledger = list(state.get("evidence_ledger", []))
         prev_chunk_ids = {p.get("chunk_id") for p in ledger}
@@ -294,7 +304,7 @@ class ResearcherGraph:
             "evidence_ledger": ledger,
             "queries_tried": queries,
             "pending_tool_call": None,
-            "_last_search_new_chunks": len(new_chunk_ids),
+            "last_search_new_chunks": len(new_chunk_ids),
         }
 
     def node_reflect(self, state: AgentState) -> Dict[str, Any]:
@@ -365,13 +375,12 @@ class ResearcherGraph:
 
         # Wall-clock check
         if self._wall_clock_exceeded(budget):
-            return {
-                "budget": budget,
-                "escalation": {
-                    "reason_code": "budget_exhausted",
-                    "reason": "Wall-clock limit exceeded before drafting.",
-                },
-            }
+            # The draft node leads straight to END, so build the escalation here; returning
+            # only an `escalation` key would end the graph with no determination at all.
+            return self.node_escalate({**state, "escalation": {
+                "reason_code": "budget_exhausted",
+                "reason": "Wall-clock limit exceeded before drafting.",
+            }})
 
         text = state["normalized_text"]
         classification = state.get("classification", {})
@@ -383,7 +392,14 @@ class ResearcherGraph:
             complaint_text=text,
             classification=json.dumps(classification),
             evidence_ledger=json.dumps(ledger),
+            evidence_items=self._evidence_items(ledger),
         )
+        if state.get("retry_feedback"):
+            prompt += (
+                "\n\nVerifier feedback on the previous draft: " + str(state["retry_feedback"])
+                + "\nCorrect this in the new draft. Cite only passages in the evidence ledger "
+                "and quote them exactly."
+            )
 
         response = self.llm.chat(
             messages=[{"role": "user", "content": prompt}],
@@ -393,7 +409,7 @@ class ResearcherGraph:
         )
         is_degraded = response.get("degraded", False) or state.get("degraded", False)
         content = response["choices"][0]["message"]["content"]
-        draft_json = self.llm.extract_json(content)
+        draft_json = self._resolve_draft(self.llm.extract_json(content), ledger)
 
         raw_entity = draft_json.get("entity_type", classification.get("entity_type", "unknown"))
         safe_entity = raw_entity if raw_entity in ALLOWED_ENTITIES else "other"
@@ -460,6 +476,89 @@ class ResearcherGraph:
             }
 
         return {"draft": determination, "status": determination["status"]}
+
+    # -----------------------------------------------------------------------
+    # Evidence numbering (M3): the model cites [E3]; code supplies the chunk
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _citable(ledger: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ledger passages a draft may cite, in E-number order. Scope cards are never citable."""
+        return [p for p in ledger if p.get("chunk_type", "clause") != "scope_card"]
+
+    def _evidence_items(self, ledger: List[Dict[str, Any]]) -> str:
+        """One numbered line per citable passage: ``[E1] {json}``."""
+        lines = []
+        for number, passage in enumerate(self._citable(ledger), start=1):
+            lines.append(f"[E{number}] " + json.dumps({
+                "framework": passage.get("framework"),
+                "doc_title": passage.get("doc_title", ""),
+                "clause": str(passage.get("clause_id") or passage.get("clause") or ""),
+                "text": passage.get("text", "")[:_EVIDENCE_ITEM_CHARS],
+            }, ensure_ascii=False))
+        return "\n".join(lines) or "(no evidence was retrieved)"
+
+    def _resolve_draft(self, draft_json: Dict[str, Any],
+                       ledger: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Make the model's draft safe to verify and store.
+
+        * A citation given by evidence number, or by a chunk id that is in the ledger, has its
+          chunk id, document, title, circular reference and clause filled from the ledger, so a
+          model never has to copy a 64-character id. One that matches nothing is left as it is
+          for the verifier to reject.
+        * ``[E3]`` markers in the basis become the matching citation ids.
+        * A malformed citation list or timeline is dropped rather than stored.
+        """
+        if not isinstance(draft_json, dict):
+            return {}
+        draft = dict(draft_json)
+        by_number = {f"E{n}": p for n, p in enumerate(self._citable(ledger), start=1)}
+        by_chunk = {p.get("chunk_id"): p for p in ledger}
+        citations, number_to_id = [], {}
+        raw = draft.get("citations")
+        for position, item in enumerate(raw if isinstance(raw, list) else [], start=1):
+            if not isinstance(item, dict):
+                continue
+            number = str(item.get("evidence_number") or item.get("evidence_id") or "").strip("[] ").upper()
+            passage = by_number.get(number) or by_chunk.get(item.get("chunk_id"))
+            citation = {
+                "citation_id": str(item.get("citation_id") or f"c{position}"),
+                "doc_id": str(item.get("doc_id") or ""),
+                "doc_title": str(item.get("doc_title") or ""),
+                "circular_ref": str(item.get("circular_ref") or ""),
+                "clause": str(item.get("clause") or ""),
+                "chunk_id": str(item.get("chunk_id") or ""),
+                "quote_span": str(item.get("quote_span") or ""),
+            }
+            if passage:
+                citation.update(
+                    doc_id=passage.get("doc_id", ""),
+                    doc_title=passage.get("doc_title", ""),
+                    circular_ref=passage.get("circular_ref", ""),
+                    clause=str(passage.get("clause_id") or passage.get("clause") or ""),
+                    chunk_id=passage.get("chunk_id", ""),
+                )
+            if number:
+                number_to_id.setdefault(number, citation["citation_id"])
+            citations.append(citation)
+        draft["citations"] = citations
+
+        if isinstance(draft.get("basis"), str) and number_to_id:
+            draft["basis"] = _EVIDENCE_REF.sub(
+                lambda m: f"[{number_to_id.get(m.group(1).upper(), m.group(1))}]", draft["basis"])
+
+        timeline = draft.get("timeline")
+        citation_ids = {c["citation_id"] for c in citations}
+        if isinstance(timeline, dict):
+            basis_id = str(timeline.get("basis_citation_id") or "").strip("[] ")
+            basis_id = number_to_id.get(basis_id.upper(), basis_id)
+            days = timeline.get("days")
+            valid = isinstance(days, int) and not isinstance(days, bool) and days >= 0
+            draft["timeline"] = ({"days": days, "basis_citation_id": basis_id}
+                                 if valid and basis_id in citation_ids else None)
+        else:
+            draft["timeline"] = None
+        return draft
 
     def node_escalate(self, state: AgentState) -> Dict[str, Any]:
         esc_info = state.get("escalation") or {
@@ -528,7 +627,7 @@ class ResearcherGraph:
             return "draft"
 
         # Stop if last search added no new chunks (M5 — idle loop guard)
-        if state.get("_last_search_new_chunks", 1) == 0:
+        if state.get("last_search_new_chunks", 1) == 0:
             return "draft"
 
         return "plan"
@@ -548,7 +647,6 @@ class ResearcherGraph:
             "current_framework": "",  # M8: empty, not "SEBI"
             "pending_tool_call": None,
             "reflection": None,
-            "strategy_idx": 0,
             "budget": {
                 "steps": 0,
                 "max_steps": _MAX_STEPS,
@@ -564,7 +662,134 @@ class ResearcherGraph:
             "escalation": None,
             "prompt_versions": {},
             "degraded": False,
-            "_last_search_new_chunks": 0,
+            "last_search_new_chunks": 0,
+            "retry_feedback": None,
         }
         final_state = self.graph.invoke(initial_state)
-        return final_state.get("draft", {})
+        return self._with_research_state(final_state.get("draft"), final_state, [])
+
+    # -----------------------------------------------------------------------
+    # Verifier retry (M6): search again with a different strategy, then re-draft
+    # -----------------------------------------------------------------------
+
+    def retry(self, run_id: str, complaint_fields: Dict[str, Any], prior_draft: Dict[str, Any],
+              suggested_strategy: Optional[str], reason: str) -> Dict[str, Any]:
+        """Re-research and re-draft after the verifier rejected ``prior_draft``.
+
+        The run's ledger, queries and budget carry over, so the bounds still cover the whole run.
+        The returned draft records the strategy used under ``_research_state``.
+        """
+        prior = prior_draft.get("_research_state") or {}
+        used = list(prior.get("strategies_used", []))
+        state: AgentState = {
+            "run_id": run_id,
+            "complaint_fields": complaint_fields,
+            "normalized_text": " ".join(complaint_fields.get("text", "").split()),
+            "classification": prior.get("classification", {}),
+            "evidence_ledger": list(prior_draft.get("_evidence_ledger", [])),
+            "queries_tried": list(prior.get("queries_tried", [])),
+            "current_framework": prior.get("current_framework", ""),
+            "budget": prior.get("budget") or {
+                "steps": 0, "max_steps": _MAX_STEPS, "tool_calls": 0,
+                "max_tool_calls": _MAX_TOOL_CALLS, "started_at": time.time(),
+                "max_wall_clock_s": _RUN_WALL_CLOCK_S,
+            },
+            "verify_attempts": len(used) + 2,
+            "degraded": bool(prior_draft.get("degraded", False)),
+            "retry_feedback": reason,
+        }
+
+        strategy, tool_call = self._retry_tool_call(state, prior_draft, suggested_strategy, used)
+        used.append(strategy)
+        budget = state["budget"]
+        if tool_call and budget["tool_calls"] < budget["max_tool_calls"]:
+            state["pending_tool_call"] = tool_call
+            if tool_call["args"].get("framework"):
+                state["current_framework"] = tool_call["args"]["framework"]
+            state.update(self.node_tool(state))
+
+        if state.get("escalation"):
+            state.update(self.node_escalate(state))
+        else:
+            state.update(self.node_draft(state))
+        return self._with_research_state(state.get("draft"), state, used)
+
+    def _retry_tool_call(self, state: AgentState, prior_draft: Dict[str, Any],
+                         suggested: Optional[str], used: List[str]):
+        """Pick the first unused strategy, starting from the verifier's suggestion, that can act."""
+        order = [s for s in ([suggested] if suggested in RETRY_STRATEGIES else []) +
+                 list(RETRY_STRATEGIES) if s not in used]
+        order = list(dict.fromkeys(order)) or ["query_rewrite"]
+        for strategy in order:
+            tool_call = getattr(self, f"_strategy_{strategy}")(state, prior_draft)
+            if tool_call:
+                return strategy, tool_call
+        return order[0], None
+
+    def _strategy_query_rewrite(self, state: AgentState, prior_draft: Dict[str, Any]):
+        """New query built from the headings of passages already read plus the complaint."""
+        framework = state.get("current_framework") or None
+        headings: List[str] = []
+        for passage in state.get("evidence_ledger", []):
+            if framework and passage.get("framework") != framework:
+                continue
+            path = passage.get("heading_path") or []
+            for heading in ([path] if isinstance(path, str) else path)[-1:]:
+                if heading and heading not in headings:
+                    headings.append(heading)
+        query = " ".join(headings[:2] + [state["normalized_text"][:160]]).strip()
+        if not query or query in state.get("queries_tried", []):
+            return None
+        return {"tool_name": "search_corpus", "args": {"query": query, "framework": framework, "k": 5}}
+
+    def _strategy_framework_swap(self, state: AgentState, prior_draft: Dict[str, Any]):
+        """Search the other framework; a draft may be citing the wrong regulator's text."""
+        current = state.get("current_framework")
+        searched = {p.get("framework") for p in state.get("evidence_ledger", [])}
+        target = prior_draft.get("regulator")
+        if target not in ("SEBI", "RBI") or target in searched:
+            target = "RBI" if current == "SEBI" else "SEBI"
+        if target in searched:
+            return None  # both frameworks already have evidence in the ledger
+        queries = state.get("queries_tried", [])
+        product = state.get("classification", {}).get("product", "grievance")
+        query = queries[-1] if queries else f"{product} grievance redressal"
+        return {"tool_name": "search_corpus", "args": {"query": query, "framework": target, "k": 5}}
+
+    def _strategy_clause_follow(self, state: AgentState, prior_draft: Dict[str, Any]):
+        """Fetch a clause that a passage already read refers to and that is not yet in the ledger."""
+        ledger = state.get("evidence_ledger", [])
+        have = {(p.get("doc_id"), str(p.get("clause_id") or p.get("clause") or "")) for p in ledger}
+        for passage in ledger:
+            for clause_id in _CROSS_REFERENCE.findall(passage.get("text", "")):
+                if passage.get("doc_id") and (passage["doc_id"], clause_id) not in have:
+                    return {"tool_name": "get_clause",
+                            "args": {"doc_id": passage["doc_id"], "clause_id": clause_id}}
+        return None
+
+    def _as_passages(self, result: Any) -> List[Dict[str, Any]]:
+        """Tool results as ledger passages: a search returns a list, get_clause a single clause."""
+        if not result:
+            return []
+        if isinstance(result, list):
+            return result
+        if result.get("chunk_id"):
+            return [result]
+        chunks = [self.retrieval.get_chunk(chunk_id) for chunk_id in result.get("chunk_ids", [])]
+        return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
+    def _with_research_state(draft: Optional[Dict[str, Any]], state: AgentState,
+                             strategies_used: List[str]) -> Optional[Dict[str, Any]]:
+        """Attach what a retry needs to continue this run; underscore keys are never stored."""
+        if not draft:
+            return draft
+        draft = dict(draft)
+        draft["_research_state"] = {
+            "classification": state.get("classification", {}),
+            "queries_tried": list(state.get("queries_tried", [])),
+            "current_framework": state.get("current_framework", ""),
+            "budget": state.get("budget"),
+            "strategies_used": list(strategies_used),
+        }
+        return draft

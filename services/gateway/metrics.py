@@ -10,7 +10,10 @@ LATENCY = Histogram(
     ["method", "route"], buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
 )
 RATE_LIMIT_REJECTIONS = Counter(
-    "orcas_gateway_rate_limit_rejections_total", "Complaint submissions rejected per client"
+    "orcas_gateway_rate_limit_rejections_total", "Complaint submissions rejected by intake limits"
+)
+INPUT_ABUSE_DETECTIONS = Counter(
+    "orcas_gateway_input_abuse_detections_total", "Accepted complaints containing abusive language"
 )
 CACHE_LOOKUPS = Counter(
     "orcas_gateway_run_cache_lookups_total", "Completed-run cache lookups", ["outcome"]

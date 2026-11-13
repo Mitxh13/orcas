@@ -1,11 +1,14 @@
 name: Complaint processing benchmark
 
+# Long-running and resource-heavy, so it is started by hand: Actions tab, "Run workflow",
+# or `gh workflow run <file> --ref <branch>`. It used to trigger only on pushes to a feature
+# branch that has since been merged, which left it unreachable from main.
 on:
-  push:
-    branches:
-      - feat/jignas/reliability-and-operations
-    paths:
-      - .github/workflows/benchmark.yml
+  workflow_dispatch:
+
+env:
+  POSTGRES_PASSWORD: ci-only-password
+  RATE_LIMIT_PER_MIN: 100000
 
 jobs:
   benchmark:
@@ -23,7 +26,7 @@ jobs:
       - name: Install Locust
         run: pip install -r loadtest/requirements.txt
       - name: Build and start the stub-backed stack
-        run: docker compose up --build -d
+        run: docker compose --profile resources up --build -d
       - name: Wait for service readiness
         run: |
           for attempt in $(seq 1 60); do
@@ -48,4 +51,4 @@ jobs:
           docker compose logs --tail 100
       - name: Stop the stack
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile resources down -v

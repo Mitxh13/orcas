@@ -44,7 +44,7 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 |---|---|
 | Language | Python 3.11 |
 | Agent orchestration | LangGraph (two agents, tool-calling loop) |
-| Retrieval orchestration | LangChain |
+| Retrieval orchestration | LangChain `BaseRetriever` adapter over the retrieval service |
 | Vector store | Chroma (persistent, upsert-by-id so re-embedding is incremental) |
 | Embeddings | `sentence-transformers` `all-MiniLM-L6-v2`, local, no API cost |
 | API | FastAPI + Pydantic v2 |
@@ -60,7 +60,7 @@ Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ### Prerequisites
 - Docker Engine ≥ 24 and Docker Compose v2
-- ~8 GB free RAM, ~5 GB disk
+- At least 8 GB of Docker memory and 5 GB free disk for the stub stack; a local model needs additional memory and disk according to its size
 - No LLM API key is needed for the initial demo; the stub is enabled by default
 - Set `ORCAS_ADMIN_TOKEN` in `.env` to inspect quarantine and feedback totals
 - Python 3.11 is only needed if you want to run CLIs/tests outside Docker
@@ -72,27 +72,49 @@ git clone https://github.com/Mitxh13/orcas.git
 cd orcas
 
 cp .env.example .env
+# Replace POSTGRES_PASSWORD in .env with a private local value.
 docker compose up --build -d
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The first start builds the corpus index through the `ingest` one-shot service and creates the database tables through `migrate`. Wait until `docker compose ps` shows the long-running services healthy. Run `make doctor` or `python scripts/doctor.py` to check readiness. See the [demo guide](docs/initial_demo.md) for the valid request and quarantine proof.
+On Windows PowerShell, use `Copy-Item .env.example .env` for the copy step. The first start builds the corpus index through the `ingest` one-shot service and creates the database tables through `migrate`. Allow time for image and embedding downloads; the first-start duration must be measured on the demo laptop. Wait until `docker compose ps` shows the long-running services healthy. Run `make doctor` or `python scripts/doctor.py` to check readiness. See the [demo runbook](docs/DEMO.md) for the full presentation sequence.
 
 | What | URL |
 |---|---|
 | Web client | http://localhost:8080 |
 | Gateway API docs (OpenAPI) | http://localhost:8000/docs |
 | Retrieval API | http://localhost:8001/docs |
+| LLM gateway health (host-only port) | http://localhost:8002/health |
 | Prometheus | http://localhost:9090 |
 | Grafana | http://localhost:3000 |
 | Jaeger | http://localhost:16686 |
 
-### Variants
+### Stub, hosted provider, and Ollama
 
 ```bash
-# The default .env enables the fixed-response LLM stub.
-# Scale agent workers later when measuring throughput:
-docker compose up --scale worker=3
+# Stub mode is the default; no API key or model download is needed.
+docker compose up -d
 ```
+
+For a hosted provider, set `ORCAS_STUB_MODE=false`,
+`LLM_MODEL=<provider>/<model>`, and `LLM_API_KEY` in the private `.env` file.
+Set pricing and fallback variables only when those values are known. Recreate
+the gateway with `docker compose up -d --force-recreate llm-gateway` and check
+`docker compose logs --tail=100 llm-gateway` before sending a synthetic run.
+
+For Ollama, set `ORCAS_STUB_MODE=false`, `LLM_MODEL=ollama/<model>`, and
+`LLM_API_BASE=http://ollama:11434` in `.env`. Start its profile, pull the
+chosen model into its volume, and recreate the gateway:
+
+```bash
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull <model>
+docker compose --profile ollama up -d --force-recreate llm-gateway worker
+```
+
+Choose a model that fits the demo machine. Docker Desktop on macOS does not
+give this container GPU access; measure response time before relying on it.
+For load comparison, keep the stub enabled and use
+`docker compose up -d --scale worker=3`.
 
 ### Try the reference case
 
@@ -108,6 +130,12 @@ make test        # unit and contract tests
 make doctor      # Compose configuration and running service readiness
 make loadtest    # stub-backed end-to-end Locust workload
 ```
+
+Install local test dependencies with `make install-dev` (or
+`python -m pip install -r requirements-dev.txt`) before `make test`.
+`make eval` evaluates the agent with stub replies; use `make eval-live` only
+after configuring a live model. The [demo runbook](docs/DEMO.md) lists all ten
+presentation items.
 
 ## 5. Repository structure
 
@@ -138,7 +166,7 @@ orcas/
 └── docs/
     ├── ARCHITECTURE.md
     ├── PROJECT_DOCUMENTATION.md
-    ├── initial_demo.md
+    ├── DEMO.md
     ├── data_contract.md
     ├── slo.md
     ├── runbook.md
@@ -149,10 +177,12 @@ orcas/
 
 ## 6. Documentation
 
+- [**Project report**](docs/report/REPORT.md) — problem & scope, agent design, architecture, design decisions, evaluation results, p95 results, bottleneck, cost, what didn't work
 - [Architecture](docs/ARCHITECTURE.md)
 - [Complete project documentation](docs/PROJECT_DOCUMENTATION.md)
 - Work breakdown: [Mitesh](docs/work/MITESH.md) · [Tahir](docs/work/TAHIR.md) · [Jignas](docs/work/JIGNAS.md)
-- [Initial demo](docs/initial_demo.md) and [data contract](docs/data_contract.md)
+- [Demo runbook](docs/DEMO.md) and [data contract](docs/data_contract.md)
+- [Runbook](docs/runbook.md) · [Incident log](docs/incident_log.md) · [SLO](docs/slo.md)
 
 ## 7. Reference links
 
