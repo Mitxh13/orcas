@@ -177,10 +177,12 @@ orcas/
 
 ## 6. Documentation
 
+- [**Project report**](docs/report/REPORT.md) — problem & scope, agent design, architecture, design decisions, evaluation results, p95 results, bottleneck, cost, what didn't work
 - [Architecture](docs/ARCHITECTURE.md)
 - [Complete project documentation](docs/PROJECT_DOCUMENTATION.md)
 - Work breakdown: [Mitesh](docs/work/MITESH.md) · [Tahir](docs/work/TAHIR.md) · [Jignas](docs/work/JIGNAS.md)
 - [Demo runbook](docs/DEMO.md) and [data contract](docs/data_contract.md)
+- [Runbook](docs/runbook.md) · [Incident log](docs/incident_log.md) · [SLO](docs/slo.md)
 
 ## 7. Reference links
 
