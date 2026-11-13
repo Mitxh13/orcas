@@ -236,7 +236,7 @@ The agent (`eval/agent_sut.py`) with stub replies. Deterministic embedding (NLI-
 
 The stub's narrow parsing caused many premature escalations in the first benchmark (10 clients, 1 worker, 1.5 s stub delay). After commit `3a64fc6` hardened classification and routing:
 
-| Metric | Before (first benchmark) | After (repeat, 2026-11-11) |
+| Metric | Before (first benchmark) | After |
 |---|---|---|
 | Ten-client p95 | 40 s | **30 s** |
 | Completed / escalated in DB window | 101 / 263 | **245 / 136** |
@@ -253,7 +253,9 @@ The stub's narrow parsing caused many premature escalations in the first benchma
 At ten concurrent clients, p95 submit-to-terminal latency ≤ **90 seconds** and ≥ **99%** of accepted runs reach `completed` or `escalated`.  
 Workload: 1.5-second LLM stub, one worker container, two Celery processes, 100+ complete complaints after warmup.
 
-### 6.2 Measured results (repeat benchmark, 2026-11-11)
+
+### 6.2 Measured results
+
 
 | Workload | Workers | Clients | Observations | p50 | p95 | Throughput | Failures |
 |---|---:|---:|---:|---:|---:|---:|---:|
